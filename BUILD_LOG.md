@@ -491,7 +491,9 @@ The database layer lives in `db/`. `db/schema.sql` is the SQLite DDL source of
 truth; `db/__init__.py` makes `db` an importable Python package. The schema was
 applied to a new SQLite database at `data/processed/sentrasql.db` using the
 project's `.venv` Python (`sqlite3` stdlib, `executescript`), and it executes
-without error.
+without error. `transactions.line_item_type` is restricted to exactly
+`'product'`, `'fee'`, or `'adjustment'` by an in-DDL CHECK constraint whose
+enforcement was verified with a real INSERT test (see 6.4).
 
 Decisions recorded here:
 
@@ -499,30 +501,30 @@ Decisions recorded here:
 - **`country_timezones` is empty by design in this task** — schema only. It backs
   the timezone-handling requirement from `DESIGN_LOG.md` section 1.6 (a country →
   IANA-timezone mapping the agent reasons about at query time).
-- **Value-domain invariants documented, not CHECK-constrained** — the "one of
-  `product`/`fee`/`adjustment`" rule for `line_item_type`, the whitespace-trimmed
-  / case-normalized contract for `stock_code`, and the ISO-8601 string contract
-  for `invoice_timestamp` are preprocessing contracts enforced by the load layer
-  (the DB is loaded only from already-normalized rows), so they are written as
-  comments in the DDL rather than as SQL constraints.
+- **`line_item_type` is CHECK-constrained in DDL** — restricted to exactly
+  `'product'`, `'fee'`, or `'adjustment'` so the load layer can never persist an
+  unclassified line type. The other two value-domain invariants (`stock_code`
+  whitespace-trimmed / case-normalized and `invoice_timestamp` ISO-8601 string)
+  remain documented-as-comments load-layer contracts, since neither maps to a
+  declarative SQL constraint.
 - **`description` and `customer_id` are nullable** (they have `NULL` values in the
   source dataset: 4,382 missing descriptions and 243,007 missing customer IDs);
   everything else is `NOT NULL`.
 
 ### 6.1 Table `transactions` (DDL as written)
 
-| Column | Declared type | Nullable | Notes |
-| --- | --- | --- | --- |
-| `invoice_id` | `TEXT` | no | Invoice number; `"C"` prefix marks a cancelled invoice |
-| `is_cancelled_invoice` | `BOOLEAN` | no | `1` when `invoice_id` carries the cancellation flag, else `0` |
-| `stock_code` | `TEXT` | no | Whitespace-trimmed, case-normalized (uppercase) |
-| `description` | `TEXT` | yes | `NULL` when the source value is missing |
-| `line_item_type` | `TEXT` | no | One of `product` / `fee` / `adjustment` |
-| `quantity` | `INTEGER` | no | Signed; negative = return |
-| `unit_price` | `REAL` | no | `0` is valid (free samples / promotional items) |
-| `customer_id` | `REAL` | yes | `NULL` for guest / unknown customers |
-| `country` | `TEXT` | no | Matches the dataset's `Country` column values |
-| `invoice_timestamp` | `TEXT` | no | ISO-8601 datetime string, e.g. `2009-12-01 07:45:00` |
+| Column | Declared type | Nullable | Constraint | Notes |
+| --- | --- | --- | --- | --- |
+| `invoice_id` | `TEXT` | no | — | Invoice number; `"C"` prefix marks a cancelled invoice |
+| `is_cancelled_invoice` | `BOOLEAN` | no | — | `1` when `invoice_id` carries the cancellation flag, else `0` |
+| `stock_code` | `TEXT` | no | — | Whitespace-trimmed, case-normalized (uppercase) |
+| `description` | `TEXT` | yes | — | `NULL` when the source value is missing |
+| `line_item_type` | `TEXT` | no | `CHECK (line_item_type IN ('product', 'fee', 'adjustment'))` | One of `product` / `fee` / `adjustment` |
+| `quantity` | `INTEGER` | no | — | Signed; negative = return |
+| `unit_price` | `REAL` | no | — | `0` is valid (free samples / promotional items) |
+| `customer_id` | `REAL` | yes | — | `NULL` for guest / unknown customers |
+| `country` | `TEXT` | no | — | Matches the dataset's `Country` column values |
+| `invoice_timestamp` | `TEXT` | no | — | ISO-8601 datetime string, e.g. `2009-12-01 07:45:00` |
 
 ### 6.2 Table `country_timezones` (DDL as written)
 
@@ -550,8 +552,32 @@ PRAGMA table_info(country_timezones);
   cid=1  name='timezone'  type='TEXT'  notnull=1  dflt_value=None  pk=0
 ```
 
-Both tables match the spec exactly: column names, declared types, nullability,
-and the `country` primary key are all as required.
+`PRAGMA table_info` reports column structure only and does not surface CHECK
+constraints, so the constraint is confirmed two ways: the `CREATE TABLE` text
+stored in `sqlite_master` (which retains the column-level CHECK), and the
+behavioral INSERT test in 6.4. Both tables match the spec exactly: column names,
+declared types, nullability, and the `country` primary key are all as required.
+
+### 6.4 CHECK-constraint verification (real INSERT test)
+
+The database was deleted and rebuilt from the updated `db/schema.sql` (same
+delete-and-recreate procedure as the original build), and then a manual INSERT
+with an invalid `line_item_type` value (`'invalid_type'`) was attempted via the
+Python `sqlite3` module. The insert was rejected — exact exception observed:
+
+```text
+sqlite3.IntegrityError: CHECK constraint failed: line_item_type IN ('product', 'fee', 'adjustment')
+```
+
+(SQLite embeds the failing expression in the column-level CHECK error message.)
+
+As a positive control, one INSERT per valid value (`'product'`, `'fee'`,
+`'adjustment'`) was then accepted (the test DB reached 3 rows before being
+discarded).
+
+**Final state:** the test database was deleted and rebuilt clean from
+`db/schema.sql` only — zero rows in both tables, schema applied without error,
+and the stored `transactions` DDL retains the CHECK constraint.
 
 ---
 
@@ -560,6 +586,7 @@ and the `country` primary key are all as required.
 Full `git log --oneline` output (most recent first):
 
 ```text
+25dde1d Add transactions and country_timezones table schemas.
 cde7786 Add BUILD_LOG.md — technical record generated from actual codebase state, maintained by Cline going forward.
 2211a35 Wire skeleton LangGraph pipeline with conditional error routing.
 d5fd531 Add error-handling node stub.

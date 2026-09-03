@@ -10,9 +10,11 @@
 -- Conventions / notes:
 --   * No indexes are defined yet — deferred until query patterns are known.
 --   * country_timezones is intentionally NOT populated yet (schema only).
---   * The "value-domain" invariants on stock_code / line_item_type /
---     invoice_timestamp are preprocessing contracts (they live in the load
---     layer, not in this DDL), so they are documented as comments only.
+--   * line_item_type is restricted in DDL to exactly the three valid values
+--     ('product' | 'fee' | 'adjustment') via a CHECK constraint on the column.
+--   * The remaining value-domain invariants on stock_code (whitespace-trimmed,
+--     case-normalized) and invoice_timestamp (ISO-8601 string) are load-layer
+--     preprocessing contracts, so they are documented as comments only.
 -- ============================================================================
 
 -- Line-item-level transaction data. One row per (invoice, stock code) line.
@@ -21,7 +23,8 @@ CREATE TABLE transactions (
     is_cancelled_invoice BOOLEAN NOT NULL,  -- 1 when invoice_id carries the "C" cancellation flag, else 0
     stock_code           TEXT    NOT NULL,  -- stock code, whitespace-trimmed and case-normalized (uppercase)
     description          TEXT,              -- free-text product description; NULL when the source value is missing
-    line_item_type       TEXT    NOT NULL,  -- one of: "product" | "fee" | "adjustment"
+    line_item_type       TEXT    NOT NULL  -- one of: "product" | "fee" | "adjustment"
+                         CHECK (line_item_type IN ('product', 'fee', 'adjustment')),
     quantity             INTEGER NOT NULL,  -- signed integer; negative = return (may be negative on non-C invoices)
     unit_price           REAL    NOT NULL,  -- per-unit price; 0 is valid (free samples / promotional items)
     customer_id          REAL,              -- NULL for guest / unknown customers
