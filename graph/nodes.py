@@ -56,3 +56,10 @@ def assemble_answer(state: GraphState) -> GraphState:
 
     # TODO: implement
     return state
+
+
+def handle_error(state: GraphState) -> GraphState:
+    """Error path. Deterministic, no LLM. Runs when state.error is set (guardrail validation failure or companion query execution failure). Composes a user-facing message from state.error into state.final_answer, explicitly stating that the system could not produce a reliable answer rather than guessing or returning a partial result. Must never be bypassed when state.error is set."""
+
+    # TODO: implement
+    return state
