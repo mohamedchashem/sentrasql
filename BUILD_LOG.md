@@ -79,18 +79,22 @@ Directory tree as it actually exists on disk, excluding `.venv`, `__pycache__`, 
 .
 ├── .env                     # empty env file (gitignored; placeholder for real secrets)
 ├── .env.example             # DEEPSEEK_API_KEY=your_key_here
-├── .gitignore               # .env, .venv/, __pycache__/, *.pyc, data/raw/* (!data/raw/.gitkeep)
+├── .gitignore               # .env, .venv/, __pycache__/, *.pyc, data/raw/* & data/processed/* (!their .gitkeep files)
 ├── BUILD_LOG.md             # this file
 ├── DESIGN_LOG.md            # project working log; present on disk, currently UNTRACKED
 ├── README.md                # "# SentraSQL" + tagline
 ├── requirements.txt         # pinned dependency list (see Environment section)
 ├── app/                     # empty placeholder folder (not git-tracked)
 ├── data/
-│   ├── processed/           # placeholder for processed data; contains .gitkeep
+│   ├── processed/           # processed/derived data (gitignored, except .gitkeep)
+│   │   ├── .gitkeep
+│   │   └── sentrasql.db     # SQLite DB — schema only (no rows yet); created from db/schema.sql (see section 6)
 │   └── raw/                 # raw dataset input folder
 │       ├── .gitkeep
 │       └── online_retail_II.csv   # ~94.8 MB raw dataset (~1,067,371 rows), gitignored
-├── db/                      # empty placeholder folder (not git-tracked)
+├── db/                      # database layer — DDL + package init
+│   ├── __init__.py          # empty package marker (db is an importable package)
+│   └── schema.sql           # SQLite DDL: transactions + country_timezones (see section 6)
 ├── graph/                   # LangGraph pipeline package
 │   ├── build.py             # graph construction/wiring + module-level compiled graph
 │   ├── nodes.py             # eight node stubs (no logic yet)
@@ -108,17 +112,18 @@ Folder purposes:
 
 | Folder | Purpose |
 | --- | --- |
-| `data/` | Holds **only data files**. `raw/` = unmodified source data; `processed/` = cleaned/derived data (currently empty). |
+| `data/` | Holds **only data files**. `raw/` = unmodified source data; `processed/` = cleaned/derived data (currently holds the schema-only `sentrasql.db`). |
 | `graph/` | Core application code for the LangGraph pipeline: state schema, node functions, and graph wiring. |
 | `scripts/` | Reusable utility and data-profiling scripts (separate from application code). |
 | `app/` | Reserved for user-facing application code (currently empty). |
-| `db/` | Reserved for database layer code — schema/connections/migrations (currently empty). |
+| `db/` | Database layer — `schema.sql` (SQLite DDL for `transactions` + `country_timezones`) and the package init marker. |
 | `tests/` | Reserved for tests (currently empty). |
 | `reports/` | Generated analysis output (currently holds the dataset profile). |
 
-> Note: `app/`, `db/`, and `tests/` exist on disk but contain no files, so git does not
-> track them (git ignores empty directories). `data/raw/*` is gitignored with an
-> exception for its `.gitkeep`, so the CSV is present on disk but not tracked.
+> Note: `app/` and `tests/` exist on disk but contain no files, so git does not
+> track them (git ignores empty directories). `data/raw/*` and `data/processed/*`
+> are gitignored with exceptions for their `.gitkeep` files — so the raw CSV and
+> the derived `data/processed/sentrasql.db` are present on disk but not tracked.
 
 ---
 
@@ -480,11 +485,82 @@ full state:
 
 ---
 
-## 6. Commit History
+## 6. Database Schema — `db/schema.sql`
+
+The database layer lives in `db/`. `db/schema.sql` is the SQLite DDL source of
+truth; `db/__init__.py` makes `db` an importable Python package. The schema was
+applied to a new SQLite database at `data/processed/sentrasql.db` using the
+project's `.venv` Python (`sqlite3` stdlib, `executescript`), and it executes
+without error.
+
+Decisions recorded here:
+
+- **No indexes yet** — deliberately deferred until query patterns are known.
+- **`country_timezones` is empty by design in this task** — schema only. It backs
+  the timezone-handling requirement from `DESIGN_LOG.md` section 1.6 (a country →
+  IANA-timezone mapping the agent reasons about at query time).
+- **Value-domain invariants documented, not CHECK-constrained** — the "one of
+  `product`/`fee`/`adjustment`" rule for `line_item_type`, the whitespace-trimmed
+  / case-normalized contract for `stock_code`, and the ISO-8601 string contract
+  for `invoice_timestamp` are preprocessing contracts enforced by the load layer
+  (the DB is loaded only from already-normalized rows), so they are written as
+  comments in the DDL rather than as SQL constraints.
+- **`description` and `customer_id` are nullable** (they have `NULL` values in the
+  source dataset: 4,382 missing descriptions and 243,007 missing customer IDs);
+  everything else is `NOT NULL`.
+
+### 6.1 Table `transactions` (DDL as written)
+
+| Column | Declared type | Nullable | Notes |
+| --- | --- | --- | --- |
+| `invoice_id` | `TEXT` | no | Invoice number; `"C"` prefix marks a cancelled invoice |
+| `is_cancelled_invoice` | `BOOLEAN` | no | `1` when `invoice_id` carries the cancellation flag, else `0` |
+| `stock_code` | `TEXT` | no | Whitespace-trimmed, case-normalized (uppercase) |
+| `description` | `TEXT` | yes | `NULL` when the source value is missing |
+| `line_item_type` | `TEXT` | no | One of `product` / `fee` / `adjustment` |
+| `quantity` | `INTEGER` | no | Signed; negative = return |
+| `unit_price` | `REAL` | no | `0` is valid (free samples / promotional items) |
+| `customer_id` | `REAL` | yes | `NULL` for guest / unknown customers |
+| `country` | `TEXT` | no | Matches the dataset's `Country` column values |
+| `invoice_timestamp` | `TEXT` | no | ISO-8601 datetime string, e.g. `2009-12-01 07:45:00` |
+
+### 6.2 Table `country_timezones` (DDL as written)
+
+| Column | Declared type | Nullable | Constraint | Notes |
+| --- | --- | --- | --- | --- |
+| `country` | `TEXT` | no | `PRIMARY KEY` | Matches the dataset's `Country` column values |
+| `timezone` | `TEXT` | no | — | IANA timezone name, e.g. `Europe/London`, `Asia/Dubai` |
+
+### 6.3 PRAGMA verification (actual output against `data/processed/sentrasql.db`)
+
+```
+PRAGMA table_info(transactions);
+  cid=0  name='invoice_id'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+  cid=1  name='is_cancelled_invoice'  type='BOOLEAN'  notnull=1  dflt_value=None  pk=0
+  cid=2  name='stock_code'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+  cid=3  name='description'  type='TEXT'  notnull=0  dflt_value=None  pk=0
+  cid=4  name='line_item_type'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+  cid=5  name='quantity'  type='INTEGER'  notnull=1  dflt_value=None  pk=0
+  cid=6  name='unit_price'  type='REAL'  notnull=1  dflt_value=None  pk=0
+  cid=7  name='customer_id'  type='REAL'  notnull=0  dflt_value=None  pk=0
+  cid=8  name='country'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+  cid=9  name='invoice_timestamp'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+PRAGMA table_info(country_timezones);
+  cid=0  name='country'  type='TEXT'  notnull=1  dflt_value=None  pk=1
+  cid=1  name='timezone'  type='TEXT'  notnull=1  dflt_value=None  pk=0
+```
+
+Both tables match the spec exactly: column names, declared types, nullability,
+and the `country` primary key are all as required.
+
+---
+
+## 7. Commit History
 
 Full `git log --oneline` output (most recent first):
 
 ```text
+cde7786 Add BUILD_LOG.md — technical record generated from actual codebase state, maintained by Cline going forward.
 2211a35 Wire skeleton LangGraph pipeline with conditional error routing.
 d5fd531 Add error-handling node stub.
 5634208 Add empty node function stubs for core LangGraph pipeline (Nodes 2-7 + 6.5).
