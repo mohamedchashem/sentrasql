@@ -88,12 +88,13 @@ Directory tree as it actually exists on disk, excluding `.venv`, `__pycache__`, 
 ├── data/
 │   ├── processed/           # processed/derived data (gitignored, except .gitkeep)
 │   │   ├── .gitkeep
-│   │   └── sentrasql.db     # SQLite DB — schema only (no rows yet); created from db/schema.sql (see section 6)
+│   │   └── sentrasql.db     # SQLite DB — transactions populated with 1,067,354 rows; created from db/schema.sql (see sections 6 and 8)
 │   └── raw/                 # raw dataset input folder
 │       ├── .gitkeep
 │       └── online_retail_II.csv   # ~94.8 MB raw dataset (~1,067,371 rows), gitignored
-├── db/                      # database layer — DDL + package init
+├── db/                      # database layer — DDL + pure transform + loader
 │   ├── __init__.py          # empty package marker (db is an importable package)
+│   ├── load.py              # schema-ready DataFrame → transactions table (see section 8)
 │   ├── schema.sql           # SQLite DDL: transactions + country_timezones (see section 6)
 │   └── transform.py         # raw DataFrame → schema-ready DataFrame (see section 7)
 ├── graph/                   # LangGraph pipeline package
@@ -106,6 +107,7 @@ Directory tree as it actually exists on disk, excluding `.venv`, `__pycache__`, 
 │   ├── profile_anomalies.py # console anomaly scan (Quantity/Price/Invoice/StockCode)
 │   ├── profile_dataset.py   # dataset profiling → reports/data_profile.md
 │   ├── profile_stockcodes.py# StockCode-structure anomaly scan (console)
+│   ├── run_load.py          # load dataset into transactions + verification queries (see section 8)
 │   └── run_transform_check.py# smoke-test of db/transform.py → verification report (see section 7)
 └── tests/                   # empty placeholder folder (not git-tracked)
 ```
@@ -114,11 +116,11 @@ Folder purposes:
 
 | Folder | Purpose |
 | --- | --- |
-| `data/` | Holds **only data files**. `raw/` = unmodified source data; `processed/` = cleaned/derived data (currently holds the schema-only `sentrasql.db`). |
+| `data/` | Holds **only data files**. `raw/` = unmodified source data; `processed/` = cleaned/derived data (currently holds the populated `sentrasql.db`). |
 | `graph/` | Core application code for the LangGraph pipeline: state schema, node functions, and graph wiring. |
-| `scripts/` | Reusable utility, data-profiling, and verification scripts (separate from application code); `run_transform_check.py` smoke-tests `db/transform.py`. |
+| `scripts/` | Reusable utility, data-profiling, and verification scripts (separate from application code); `run_transform_check.py` smoke-tests `db/transform.py` and `run_load.py` loads + verifies the populated DB. |
 | `app/` | Reserved for user-facing application code (currently empty). |
-| `db/` | Database layer — `schema.sql` (SQLite DDL for `transactions` + `country_timezones`), `transform.py` (raw CSV → schema-ready DataFrame), and the package init marker. |
+| `db/` | Database layer — `schema.sql` (SQLite DDL for `transactions` + `country_timezones`), `transform.py` (raw CSV → schema-ready DataFrame), `load.py` (schema-ready DataFrame → `transactions` rows), and the package init marker. |
 | `tests/` | Reserved for tests (currently empty). |
 | `reports/` | Generated analysis output (currently holds the dataset profile). |
 
@@ -497,6 +499,10 @@ without error. `transactions.line_item_type` is restricted to exactly
 `'product'`, `'fee'`, or `'adjustment'` by an in-DDL CHECK constraint whose
 enforcement was verified with a real INSERT test (see 6.4).
 
+**Current state:** `transactions` is no longer schema-only — it holds the
+1,067,354 rows loaded by `db/load.py` (see section 8). `country_timezones`
+remains empty by design.
+
 Decisions recorded here:
 
 - **No indexes yet** — deliberately deferred until query patterns are known.
@@ -579,7 +585,9 @@ discarded).
 
 **Final state:** the test database was deleted and rebuilt clean from
 `db/schema.sql` only — zero rows in both tables, schema applied without error,
-and the stored `transactions` DDL retains the CHECK constraint.
+and the stored `transactions` DDL retains the CHECK constraint. (That was the
+state of `data/processed/sentrasql.db` before the load-layer task in section 8
+populated `transactions` with the full dataset.)
 
 ---
 
@@ -672,11 +680,106 @@ merged here as captured from the console.)
 
 ---
 
-## 8. Commit History
+## 8. Data Loading Layer — `db/load.py` + `scripts/run_load.py`
+
+`db/load.py` is the persistence counterpart to `db/transform.py` (section 7):
+a DataFrame in the exact schema-ready shape returned by `transform_raw_data`
+is inserted into the `transactions` table of the SQLite database at
+`data/processed/sentrasql.db`. `db/__init__.py` makes it importable as
+`db.load`.
+
+### 8.1 Public API
+
+| Symbol | Exact signature / value | Notes |
+| --- | --- | --- |
+| `load_transactions` | `def load_transactions(db_path: str \| Path, df: pd.DataFrame) -> None:` | Inserts every row of `df` into `transactions` in one transaction. |
+| `TRANSACTION_COLUMNS` | `("invoice_id", "is_cancelled_invoice", "stock_code", "description", "line_item_type", "quantity", "unit_price", "customer_id", "country", "invoice_timestamp")` | Exact schema-ready column set/order (mirrors `db/transform.py` output and `db/schema.sql`). |
+
+### 8.2 Load guarantees (as coded)
+
+1. **Parameterized SQL only.** One `INSERT INTO transactions (...) VALUES (?, ?, ...)` statement is prepared once and executed with `executemany`; every value is bound through `?` placeholders — values are never string-formatted into SQL.
+2. **Single transaction / all-or-nothing.** The connection context manager (`with conn:`) commits only when every insert succeeded; any exception rolls the whole batch back, so either all 1,067,354 rows persist or none do.
+3. **Errors propagate.** `load_transactions` catches nothing around the insert; a `sqlite3.IntegrityError` (e.g. CHECK / NOT NULL violation) or any other error surfaces to the caller after rollback.
+4. **Native Python parameter values.** Columns are re-selected in `TRANSACTION_COLUMNS` order, missing values (`NaN` / `NaT` / `pd.NA`) are replaced with `None`, and `Series.tolist()` normalizes pandas' `numpy` scalars to plain Python `bool`/`int`/`float`/`str`. This matters because CPython's `sqlite3` binds `numpy.bool_` / `numpy.int64` scalars as BLOBs rather than as SQLite integers.
+5. **Shape guard.** A `ValueError` is raised up front if any of the ten required columns is missing from the DataFrame.
+
+Behavior was verified on a temporary test database before the real load: a
+valid 5,000-row subset inserted cleanly, and an insert containing one invalid
+`line_item_type` value raised `sqlite3.IntegrityError` (`CHECK constraint
+failed: line_item_type IN ('product', 'fee', 'adjustment')`) and rolled back to
+zero rows, confirming the all-or-nothing transaction.
+
+### 8.3 `scripts/run_load.py`
+
+End-to-end loader script. It reuses `profile_dataset.find_dataset_file` and
+`profile_dataset.load_dataset` (no duplicated loading logic — same file
+detection + UTF-8/latin1 fallback as every other script), runs the full raw
+file through `transform_raw_data`, calls `db.load.load_transactions` against
+`data/processed/sentrasql.db` (or the database path given as the first CLI
+argument), and then runs + prints three verification queries against the
+now-populated database:
+
+1. `SELECT COUNT(*) FROM transactions` — total row count;
+2. `SELECT line_item_type, COUNT(*) FROM transactions GROUP BY line_item_type`;
+3. `SELECT * FROM transactions LIMIT 1` — one full sample row.
+
+Run protocol followed before touching the real database: the loader was first
+run against a throwaway copy of the (then empty) schema-only database
+(`data/processed/sentrasql_dryrun.db`); that dry run loaded all 1,067,354 rows
+and passed all three verifications cleanly. Only then was it run for real
+against `data/processed/sentrasql.db`, and the throwaway copy was deleted.
+
+### 8.4 Real-run verification output (verbatim)
+
+Run with the `.venv` Python 3.12.14 interpreter from the project root via
+`python scripts/run_load.py`. The `INFO: Read CSV ... using encoding: utf-8`
+line is emitted on stderr by `profile_dataset.load_dataset` (not shown here);
+everything below is the unmodified stdout of the real run:
+
+```text
+Dataset file: online_retail_II.csv
+Transformed rows: 1,067,354 rows x 10 columns
+Target database: C:\Users\DELL\Desktop\NLP Task 1 SentraSQL\data\processed\sentrasql.db
+Loading transactions (single transaction) ...
+Load complete: 1,067,354 rows inserted.
+
+=== Verification 1: total row count in transactions ===
+SQL: SELECT COUNT(*) FROM transactions
+  1,067,354
+
+=== Verification 2: line_item_type value counts ===
+SQL: SELECT line_item_type, COUNT(*) FROM transactions GROUP BY line_item_type
+  adjustment          1,883
+  fee                 4,011
+  product         1,061,460
+
+=== Verification 3: one full sample row ===
+SQL: SELECT * FROM transactions LIMIT 1
+  invoice_id = 489434
+  is_cancelled_invoice = 0
+  stock_code = 85048
+  description = 15CM CHRISTMAS GLASS BALL 20 LIGHTS
+  line_item_type = product
+  quantity = 12
+  unit_price = 6.95
+  customer_id = 13085.0
+  country = United Kingdom
+  invoice_timestamp = 2009-12-01T07:45:00
+```
+
+The verification counts match the transformation layer's expectations exactly
+(product 1,061,460 / fee 4,011 / adjustment 1,883 — see section 7.3), and the
+`is_cancelled_invoice = 0` integer confirms `BOOLEAN` values were stored as
+SQLite integers, not BLOBs.
+
+---
+
+## 9. Commit History
 
 Full `git log --oneline` output (most recent first):
 
 ```text
+107b518 Add data transformation logic (raw CSV to schema-ready DataFrame).
 7b83881 Add CHECK constraint enforcing line_item_type domain.
 25dde1d Add transactions and country_timezones table schemas.
 cde7786 Add BUILD_LOG.md — technical record generated from actual codebase state, maintained by Cline going forward.
