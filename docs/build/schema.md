@@ -114,3 +114,17 @@ Implementation detail worth preserving: `sqlglot.parse()` (not `parse_one()`) is
 
 ---
 
+
+## Guardrail Validation Layer — Update (Rules 4–10 complete)
+
+`db/guardrails.py`'s `validate_sql` now implements the full AST-structural rule set from the v2 guardrail design (DESIGN_LOG.md §4 architecture note, §12):
+
+- **Rule 4 — Table whitelist:** every FROM/JOIN/subquery table reference checked against a required `schema: dict[str, set[str]]` parameter (no default — a missing schema is a loud error, not a silent permissive mode). CTE aliases are correctly excluded from this check (they're not real tables); tables referenced inside a CTE body are still validated.
+- **Rule 5 — Column whitelist:** scope-aware column resolution (each column resolves against its nearest enclosing SELECT's visible tables). Qualified columns (`t.quantity`) resolve directly; unqualified columns resolve only if exactly one visible table has that column name — genuinely ambiguous unqualified columns in a multi-table JOIN (e.g. `country`, present in both tables) are rejected as `disallowed_column`, matching how SQLite itself would treat the ambiguity.
+- **Rule 6 — Function whitelist:** only `COUNT, SUM, AVG, MIN, MAX, ROUND, STRFTIME, DATE, DATETIME, CAST, COALESCE` are permitted. Required real investigation of sqlglot's internal function-node representations (aggregates, scalar builtins, `CAST`, and sqlglot's own function-rewriting behavior for unsupported functions like `DATEDIFF`) to avoid both false rejections and false approvals.
+- **Rule 7 — Wildcard rejection:** bare `SELECT *` and `table.*` are rejected (`wildcard_select`), including when hidden inside a subquery or CTE. `COUNT(*)` and similar aggregate usages are correctly unaffected, since `*` there is a function argument, not a projection wildcard.
+- **Rule 8 — Unconditioned JOIN rejection:** any JOIN without a real ON/USING condition is rejected (`unconditioned_join`), covering explicit CROSS JOIN, implicit comma joins (indistinguishable from CROSS JOIN in the AST), bare JOIN with no condition, and NATURAL JOIN. **Deliberate scope limitation:** NATURAL JOIN is valid SQLite syntax with real join semantics, but is blanket-rejected here since it structurally lacks ON/USING — acceptable because our two-table schema has no current need for it, not because it's unsafe in principle.
+- **Rule 10 — Row-limit enforcement:** `validate_sql`'s return contract is now `tuple[bool, str | None, str | None, bool]` — (passed, reason, enforced SQL, truncated flag). Two named provisional tiers exist (500 rows for LLM-context queries, 50,000 for a not-yet-built bulk/report consumer) per DESIGN_LOG.md §12 — both numbers remain provisional, not finalized. Missing or over-ceiling LIMIT clauses are clamped, never rejected; the `truncated` flag is intended to eventually feed Node 6.5's disclosure mechanism as a fifth disclosure source (not yet wired — Node 6.5 is still a stub).
+- **Not yet implemented:** Rule 11 (opening the SQLite connection itself in read-only mode as a second, independent safety layer).
+
+All rules verified via an extensive `__main__` test harness covering both required cases and additional adversarial cases discovered through investigation of sqlglot's actual behavior (not assumed) — several genuine edge-case bugs were found and fixed during this process (e.g., `LIMIT ALL` initially being misidentified as a disallowed column reference).
