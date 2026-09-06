@@ -9,7 +9,8 @@
 --
 -- Conventions / notes:
 --   * No indexes are defined yet — deferred until query patterns are known.
---   * country_timezones is intentionally NOT populated yet (schema only).
+--   * country_timezones is populated at load time (43 rows) by
+--     scripts/run_load_timezones.py; this file provides its DDL only.
 --   * line_item_type is restricted in DDL to exactly the three valid values
 --     ('product' | 'fee' | 'adjustment') via a CHECK constraint on the column.
 --   * The remaining value-domain invariants on stock_code (whitespace-trimmed,
@@ -34,7 +35,8 @@ CREATE TABLE transactions (
 
 -- Country -> IANA timezone lookup table (see DESIGN_LOG.md section 1.6).
 -- country values match the dataset's Country column; timezone is an IANA name
--- such as "Europe/London" or "Asia/Dubai". Populated in a later task.
+-- such as "Europe/London" or "Asia/Dubai". Populated from db/timezones.py by
+-- scripts/run_load_timezones.py (43 rows).
 CREATE TABLE country_timezones (
     country  TEXT NOT NULL PRIMARY KEY,  -- matches the dataset's Country column values
     timezone TEXT NOT NULL               -- IANA timezone name, e.g. "Europe/London"
