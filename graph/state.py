@@ -59,6 +59,12 @@ class QueryIntent(BaseModel):
             means the query is not grouped.
         filters: Canonical filter constraints to apply, mapping filter/column
             names to their values. Empty by default (no filters).
+        net_gross: Which named revenue/quantity filter variant the query asks
+            for, resolved by the NET_VS_GROSS rule. Exactly one of
+            "net" (the default; sum signed amounts as recorded, no extra
+            filter), "gross_of_cancellations" (AND ``invoice_id NOT LIKE
+            'C%'``), or "returns" (AND ``quantity < 0``). Only meaningful when
+            the NET_VS_GROSS rule fires; defaults to "net".
         output_format: How the answer should be presented. Restricted to
             "chat" or "report"; defaults to "chat".
         assumptions: Assumptions made while parsing the query. The default
@@ -71,6 +77,7 @@ class QueryIntent(BaseModel):
     metric: str
     group_by: list[str] | None = None
     filters: dict = Field(default_factory=dict)
+    net_gross: Literal["net", "gross_of_cancellations", "returns"] = "net"
     output_format: Literal["chat", "report"] = "chat"
     assumptions: list[Assumption] = Field(default_factory=list)
 

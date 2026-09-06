@@ -358,3 +358,15 @@ full state:
 
 ---
 
+
+## compile_sql (Node 4) — Complete
+
+`compile_sql` deterministically builds SQL from `state.query_intent` and `state.applicable_rules`, using sqlglot's AST-construction API (never string templates). Core guarantee: main and companion queries are built from one shared, atomically-constructed set of conditions — any condition reused across queries is `.copy()`'d before a second attachment, since sqlglot nodes are mutable and carry parent references.
+
+Implements all four disclosure rules: `AVG_EXCLUDE_ZERO_PRICE`, `CUSTOMER_EXCLUDE_NULL`, and `PRODUCT_EXCLUDE_NONPRODUCT` each add a companion `COUNT(*)` query and AND-compose their negation onto the main query's WHERE clause; `NET_VS_GROSS` (via a new `QueryIntent.net_gross` field: `"net"`/`"gross_of_cancellations"`/`"returns"`) produces no companion query, selecting one of three mutually-exclusive named filter variants instead. All four rules compose correctly in any combination via AND, verified at the AST level, not just by string comparison.
+
+Four early-validation gates run before any SQL construction: aggregation/metric compatibility, group-by field validity (checked against the live schema via `db.connect.connect_readonly`, not a hardcoded list), filter sanity (reversed date ranges, near-miss/no-match filter values — the latter a deliberate v1 hard-failure, no fuzzy correction), and cross-consistency between `applicable_rules` and `query_intent` (currently scoped narrowly to one genuine structural impossibility: non-default `net_gross` without `NET_VS_GROSS` present — rule 2/3/4 semantic applicability is deliberately left to the future `detect_applicable_rules` node, not enforced here).
+
+**Known gap:** date-range filters pass validation but are not yet compiled into SQL (hits a pre-existing unsupported-literal error) — range-based filtering is not yet functional end-to-end.
+
+69 tests total (`tests/test_compile_sql.py`), including live-database verification against independently-computed reference values for every rule and combination.
