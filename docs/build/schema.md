@@ -128,3 +128,14 @@ Implementation detail worth preserving: `sqlglot.parse()` (not `parse_one()`) is
 - **Not yet implemented:** Rule 11 (opening the SQLite connection itself in read-only mode as a second, independent safety layer).
 
 All rules verified via an extensive `__main__` test harness covering both required cases and additional adversarial cases discovered through investigation of sqlglot's actual behavior (not assumed) — several genuine edge-case bugs were found and fixed during this process (e.g., `LIMIT ALL` initially being misidentified as a disallowed column reference).
+
+
+## Guardrail Layer — Complete (Rule 11: read-only connection)
+
+`db/connect.py` — new module, `connect_readonly(db_path: str | Path) -> sqlite3.Connection`. Opens the database using SQLite's URI filename facility with `mode=ro`, which opens the underlying file handle without write permission at the OS level — a real enforcement layer, not a naming convention or a soft per-connection flag. `PRAGMA query_only=ON` was considered and rejected as a weaker alternative, since it only toggles a flag on an already-writable handle rather than removing write capability at the driver/OS level.
+
+This is a deliberately separate, independent safety layer from the AST-based rules 1–10 in `db/guardrails.py` — if `sqlglot` ever mis-parses a SQLite-dialect-specific destructive statement and a bad query slips past validation, the read-only connection still blocks the actual write. Two independent layers that must both fail is a stronger guarantee than either alone.
+
+Verified via `scripts/verify_readonly.py`: reads succeed normally on a read-only connection; INSERT and CREATE TABLE attempts are both rejected at the driver level (`OperationalError: attempt to write a readonly database`); and the database file is confirmed byte-for-byte unmodified after a rejected write attempt (row counts, file size, and SHA-256 hash all identical before and after).
+
+**This completes the full v2 guardrail design (DESIGN_LOG.md §4 architecture note, §12) — all 11 rules are implemented, tested, and independently verified: parse validation, single-statement enforcement, SELECT-only enforcement, table whitelist, column whitelist, function whitelist, wildcard rejection, unconditioned-join rejection, row-limit enforcement (provisional numbers), and the read-only connection layer.**
