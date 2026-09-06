@@ -94,7 +94,8 @@ Directory tree as it actually exists on disk, excluding `.venv`, `__pycache__`, 
 │       └── online_retail_II.csv   # ~94.8 MB raw dataset (~1,067,371 rows), gitignored
 ├── db/                      # database layer — DDL + package init
 │   ├── __init__.py          # empty package marker (db is an importable package)
-│   └── schema.sql           # SQLite DDL: transactions + country_timezones (see section 6)
+│   ├── schema.sql           # SQLite DDL: transactions + country_timezones (see section 6)
+│   └── transform.py         # raw DataFrame → schema-ready DataFrame (see section 7)
 ├── graph/                   # LangGraph pipeline package
 │   ├── build.py             # graph construction/wiring + module-level compiled graph
 │   ├── nodes.py             # eight node stubs (no logic yet)
@@ -104,7 +105,8 @@ Directory tree as it actually exists on disk, excluding `.venv`, `__pycache__`, 
 ├── scripts/                 # reusable utility / profiling scripts
 │   ├── profile_anomalies.py # console anomaly scan (Quantity/Price/Invoice/StockCode)
 │   ├── profile_dataset.py   # dataset profiling → reports/data_profile.md
-│   └── profile_stockcodes.py# StockCode-structure anomaly scan (console)
+│   ├── profile_stockcodes.py# StockCode-structure anomaly scan (console)
+│   └── run_transform_check.py# smoke-test of db/transform.py → verification report (see section 7)
 └── tests/                   # empty placeholder folder (not git-tracked)
 ```
 
@@ -114,9 +116,9 @@ Folder purposes:
 | --- | --- |
 | `data/` | Holds **only data files**. `raw/` = unmodified source data; `processed/` = cleaned/derived data (currently holds the schema-only `sentrasql.db`). |
 | `graph/` | Core application code for the LangGraph pipeline: state schema, node functions, and graph wiring. |
-| `scripts/` | Reusable utility and data-profiling scripts (separate from application code). |
+| `scripts/` | Reusable utility, data-profiling, and verification scripts (separate from application code); `run_transform_check.py` smoke-tests `db/transform.py`. |
 | `app/` | Reserved for user-facing application code (currently empty). |
-| `db/` | Database layer — `schema.sql` (SQLite DDL for `transactions` + `country_timezones`) and the package init marker. |
+| `db/` | Database layer — `schema.sql` (SQLite DDL for `transactions` + `country_timezones`), `transform.py` (raw CSV → schema-ready DataFrame), and the package init marker. |
 | `tests/` | Reserved for tests (currently empty). |
 | `reports/` | Generated analysis output (currently holds the dataset profile). |
 
@@ -581,11 +583,101 @@ and the stored `transactions` DDL retains the CHECK constraint.
 
 ---
 
-## 7. Commit History
+## 7. Data Transformation Layer — `db/transform.py` + `scripts/run_transform_check.py`
+
+The load-layer preprocessing contracts documented in section 6 (stock_code
+whitespace-trimmed/case-normalized, line_item_type in the DDL CHECK domain,
+invoice_timestamp as an ISO-8601 string) are now implemented in
+`db/transform.py`. The module is intentionally pure and DB-free: a DataFrame in
+the raw CSV shape produced by `scripts/profile_dataset.py`'s `load_dataset`
+goes in and a schema-ready DataFrame comes out — no database connection, no SQL,
+no file I/O. `db/__init__.py` makes it importable as `db.transform`.
+
+### 7.1 Public API
+
+| Symbol | Exact signature / value | Notes |
+| --- | --- | --- |
+| `transform_raw_data` | `def transform_raw_data(raw_df: pd.DataFrame) -> pd.DataFrame:` | Never mutates its input (starts from `raw_df.copy()`). |
+| `FEE_STOCK_CODES` | `frozenset({"POST", "DOT", "C2", "BANK CHARGES", "AMAZONFEE", "CRUK"})` | Hardcoded fee list (DESIGN_LOG.md §2.3). |
+| `ADJUSTMENT_STOCK_CODES` | `frozenset({"M", "D", "S", "ADJUST", "ADJUST2", "B"})` | Hardcoded adjustment list (DESIGN_LOG.md §2.3). |
+| `GIFT_CODE_PREFIX` | `"GIFT_0001"` | Any code starting with this prefix (case-insensitive, tested after uppercasing) → `adjustment`. |
+
+### 7.2 Pipeline (exact order as coded)
+
+1. Drop rows whose whitespace-trimmed, uppercased `StockCode` equals
+   `TEST001` / `TEST002`. The raw CSV contains **17 such rows** (15× `TEST001`,
+   2× `TEST002`, each on its own invoice) — DESIGN_LOG.md's "the two
+   TEST001/TEST002 rows" means the two distinct *codes*, not the row count; all
+   17 rows are dropped.
+2. Whitespace-trim and uppercase-normalize `StockCode` for every remaining row.
+3. Add `line_item_type`: a fee code → `fee`; an adjustment code or any
+   `GIFT_0001*` prefix → `adjustment`; every other row → `product`. Values are
+   therefore always inside the `transactions.line_item_type` CHECK domain.
+4. Add `is_cancelled_invoice` = `True` when `Invoice` (as a string) starts with
+   `"C"`, else `False`.
+5. Convert `InvoiceDate` to a real pandas datetime
+   (`pd.to_datetime` → `datetime64[ns]`) and then to an ISO-8601 string
+   `%Y-%m-%dT%H:%M:%S` (e.g. `2009-12-01T07:45:00`) stored as `invoice_timestamp`.
+6. Rename raw columns to the `transactions` schema names and return exactly:
+   `invoice_id`, `is_cancelled_invoice`, `stock_code`, `description`,
+   `line_item_type`, `quantity`, `unit_price`, `customer_id`, `country`,
+   `invoice_timestamp`.
+
+`description` and `customer_id` nulls are intentionally preserved (those schema
+columns are nullable; the raw dataset has 4,381 / 243,006 nulls respectively in
+the transformed output).
+
+### 7.3 `scripts/run_transform_check.py`
+
+Console smoke test. It reuses `profile_dataset.find_dataset_file` and
+`profile_dataset.load_dataset` (no duplicated loading logic — same file
+detection + UTF-8/latin1 fallback as the profiling scripts), runs the full raw
+file through `transform_raw_data`, and prints the verification report below.
+Because it is run directly as `python scripts/run_transform_check.py`, the
+script prepends both the project root and its own directory to `sys.path` so
+the `db` package and the sibling profile modules both resolve.
+
+Actual output (run with the `.venv` Python 3.12.14 interpreter from the project
+root via `python scripts/run_transform_check.py`):
+
+```text
+Dataset file: online_retail_II.csv
+Raw shape: 1,067,371 rows x 8 columns
+
+=== Resulting shape ===
+1,067,354 rows x 10 columns
+
+=== line_item_type value counts ===
+  product         1,061,460
+  fee                 4,011
+  adjustment          1,883
+
+=== TEST001/TEST002 removal check ===
+  Rows matching TEST001/TEST002 in raw data: 17
+  Rows matching TEST001/TEST002 after transform: 0
+  Confirmed: no TEST001/TEST002 rows remain -> True
+
+=== First 5 transformed rows ===
+invoice_id  is_cancelled_invoice stock_code                         description line_item_type  quantity  unit_price  customer_id        country   invoice_timestamp
+    489434                 False      85048 15CM CHRISTMAS GLASS BALL 20 LIGHTS        product        12        6.95      13085.0 United Kingdom 2009-12-01T07:45:00
+    489434                 False     79323P                  PINK CHERRY LIGHTS        product        12        6.75      13085.0 United Kingdom 2009-12-01T07:45:00
+    489434                 False     79323W                 WHITE CHERRY LIGHTS        product        12        6.75      13085.0 United Kingdom 2009-12-01T07:45:00
+    489434                 False      22041        RECORD FRAME 7" SINGLE SIZE         product        48        2.10      13085.0 United Kingdom 2009-12-01T07:45:00
+    489434                 False      21232      STRAWBERRY CERAMIC TRINKET BOX        product        24        1.25      13085.0 United Kingdom 2009-12-01T07:45:00
+```
+
+(The `INFO: Read CSV 'online_retail_II.csv' using encoding: utf-8` line is
+emitted on stderr by `profile_dataset.load_dataset`'s logger; stdout/stderr are
+merged here as captured from the console.)
+
+---
+
+## 8. Commit History
 
 Full `git log --oneline` output (most recent first):
 
 ```text
+7b83881 Add CHECK constraint enforcing line_item_type domain.
 25dde1d Add transactions and country_timezones table schemas.
 cde7786 Add BUILD_LOG.md — technical record generated from actual codebase state, maintained by Cline going forward.
 2211a35 Wire skeleton LangGraph pipeline with conditional error routing.
