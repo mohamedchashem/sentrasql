@@ -101,5 +101,16 @@ and the stored `transactions` DDL retains the CHECK constraint. (That was the
 state of `data/processed/sentrasql.db` before the load-layer task in section 8
 populated `transactions` with the full dataset.)
 
+
+## Guardrail Validation Layer — `db/guardrails.py`
+
+`validate_sql(sql: str) -> tuple[bool, str | None]` — first implementation, checks 1–3 of the full guardrail design (see DESIGN_LOG.md for the full planned rule set; further rules — table/column/function whitelisting, JOIN validation, SELECT * rejection, row limits — are separate, later tasks).
+
+Current checks: rejects empty/no real statement (`no_statement`), rejects unparseable SQL (`unparseable_sql`), rejects more than one real statement (`multiple_statements`), rejects any non-SELECT statement type (`not_a_select`). Uses `sqlglot` with SQLite as the parse dialect.
+
+Known, deliberate scope limitation: compound set operations (`UNION`, `INTERSECT`, `EXCEPT`) currently fall under `not_a_select` since they parse to a different root node type than a plain `SELECT`. This is intentional for now, not an oversight — revisit if a future query pattern genuinely needs compound queries.
+
+Implementation detail worth preserving: `sqlglot.parse()` (not `parse_one()`) is used for statement counting, since `parse_one()` silently wraps stacked statements into a single block rather than exposing them as separate statements. Empty/whitespace/comment-only input and trailing-comment-after-semicolon cases were specifically tested to confirm they don't produce false rejections.
+
 ---
 
