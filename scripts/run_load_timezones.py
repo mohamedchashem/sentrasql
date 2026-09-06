@@ -11,8 +11,10 @@ Pipeline:
    existing loading helpers (no duplicated file detection / encoding logic).
    The derived count is validated to be exactly 43 before mapping proceeds.
 2. Call ``db.timezones.build_country_timezone_map`` (pycountry exact lookup ->
-   documented dataset aliases -> pycountry fuzzy search -> UTC fallback, with
-   pytz supplying each resolved country's primary IANA timezone).
+   documented dataset aliases -> pycountry fuzzy search -> UTC fallback; each
+   resolved country first consults the module's explicit
+   ``_COUNTRY_TIMEZONE_OVERRIDES`` and only otherwise falls through to pytz's
+   first entry for its alpha-2 code).
 3. Print a resolution report: which names resolved to a real country/timezone
    versus which fell back to UTC.
 4. Insert the mapping into the ``country_timezones`` table of

@@ -785,18 +785,20 @@ SQLite integers, not BLOBs.
 ## 9. Country-to-Timezone Mapping Layer — `db/timezones.py` + `scripts/run_load_timezones.py`
 
 The country-to-timezone layer populates the ``country_timezones`` table that
-section 6 left empty. The 43 mappings are not hardcoded: they are built from
-the real ISO/timezone libraries :mod:`pycountry` and :mod:`pytz` (installed
-into the project venv with uv and added to ``requirements.txt`` — see section
-1). ``db/timezones.py`` resolves each dataset country name to an ISO 3166
-country and derives its IANA timezone from pytz;
+section 6 left empty. The 43 mappings are derived from the real ISO/timezone
+libraries :mod:`pycountry` and :mod:`pytz` (installed into the project venv
+with uv and added to ``requirements.txt`` — see section 1) plus one small
+hardcoded override list for three multi-zone countries where pytz's zone.tab
+first entry is not the expected primary zone (see section 9.1).
+``db/timezones.py`` resolves each dataset country name to an ISO 3166 country
+and derives its IANA timezone from pytz or that override list;
 ``scripts/run_load_timezones.py`` persists the result.
 
 ### 9.1 Public API
 
 | Symbol | Exact signature / value | Notes |
 | --- | --- | --- |
-| `build_country_timezone_map` | `def build_country_timezone_map(country_names: list[str]) -> dict[str, str]` | Maps every input name to an IANA timezone string (or `UTC`); logs each UTC fallback with `logger.warning`. |
+| `build_country_timezone_map` | `def build_country_timezone_map(country_names: list[str]) -> dict[str, str]` | Maps every input name to an IANA timezone string (or `UTC`); honors `_COUNTRY_TIMEZONE_OVERRIDES` for Australia/Canada/Brazil, logs each resolved mapping (`override` vs `pytz default`) with `logger.debug`, and logs each UTC fallback with `logger.warning`. |
 
 Resolution is per-name and runs in this order:
 
@@ -817,14 +819,49 @@ Resolution is per-name and runs in this order:
    For this dataset that is exactly the four ambiguous/non-country values
    `Channel Islands`, `European Community`, `Unspecified` and `West Indies`.
 
-The "primary" timezone for a resolved country is the **first** entry of
-``pytz.country_timezones[alpha_2]`` (pytz's IANA zone.tab ordering), per the
-load-layer contract. For single-zone countries this is the obvious zone (e.g.
-`Japan -> Asia/Tokyo`, `United Kingdom -> Europe/London`); for multi-zone
-countries it follows pytz's zone.tab ordering rather than a human "business
-capital" choice (e.g. `Australia -> Australia/Lord_Howe`,
-`Canada -> America/St_Johns`, `Brazil -> America/Noronha`, while
-`USA -> America/New_York`).
+The timezone choice for a resolved country runs in this order:
+
+1. **Explicit override (checked before pytz).** A module-level dict,
+   ``_COUNTRY_TIMEZONE_OVERRIDES``, maps the dataset country name directly to
+   an IANA zone once that name has resolved to a real country. It contains
+   exactly:
+
+   ```python
+   _COUNTRY_TIMEZONE_OVERRIDES = {
+       "Australia": "Australia/Sydney",
+       "Canada": "America/Toronto",
+       "Brazil": "America/Sao_Paulo",
+   }
+   ```
+
+   **Why it exists:** the original "first entry of
+   ``pytz.country_timezones``" contract assumed that list is ordered by
+   population/business relevance, but pytz actually follows IANA zone.tab
+   ordering, which is not population-based (a wrong assumption found during
+   implementation — recorded in DESIGN_LOG.md §11). For those three multi-zone
+   countries zone.tab's first entry is an outlier region —
+   `Australia -> Australia/Lord_Howe` (Lord Howe Island),
+   `Canada -> America/St_Johns` (St. John's, Newfoundland) and
+   `Brazil -> America/Noronha` (Fernando de Noronha) — not the country's
+   primary business zone (Sydney, Toronto, São Paulo). The override makes those
+   three map to the expected zone and leaves every other resolved country on
+   the pytz path.
+2. **pytz first entry (default).** Every resolved country not in the override
+   map uses the first entry of ``pytz.country_timezones[alpha_2]`` (pytz's IANA
+   zone.tab ordering), per the original load-layer contract. For single-zone
+   countries this is the obvious zone (e.g. `Japan -> Asia/Tokyo`,
+   `United Kingdom -> Europe/London`); for multi-zone countries that are not
+   overridden, zone.tab's first entry is kept (e.g. `USA -> America/New_York`
+   already matches the expected primary zone).
+3. **UTC fallback (unchanged).** Names that never resolve to a country map to
+   `UTC` and are logged at `logger.warning` (resolution step 4 above).
+
+Each resolved country is logged at `logger.debug` in the same "Mapped ..."
+style as before, now tagged with the branch that produced it: override
+mappings log `Mapped 'Australia' -> 'Australia/Sydney' (override, exact,
+alpha_2=AU).` and pytz-default mappings log `Mapped 'USA' ->
+'America/New_York' (pytz default, exact, alpha_2=US).` The UTC-fallback
+`logger.warning` lines are unchanged.
 
 ### 9.2 `scripts/run_load_timezones.py`
 
@@ -862,10 +899,13 @@ deleted.
 ### 9.3 Real-run output (verbatim)
 
 Run with the `.venv` Python 3.12.14 interpreter from the project root via
-`python scripts/run_load_timezones.py`. The `INFO: Read CSV ... using
-encoding: utf-8` line and the four `WARNING: Country ...` fallback lines are
-emitted on stderr by the loggers; everything below is the unmodified stdout of
-the real run:
+`python scripts/run_load_timezones.py`. Because the script INSERTs the rows and
+`country_timezones.country` is the PRIMARY KEY, the previously loaded 43 rows
+were removed first with `DELETE FROM country_timezones` (truncate-and-reinsert:
+43 → 0 → 43) so this is a clean rerun against the real database
+`data/processed/sentrasql.db`. The `INFO: Read CSV ... using encoding: utf-8`
+line and the four `WARNING: Country ...` fallback lines are emitted on stderr
+by the loggers; everything below is the unmodified stdout of the real run:
 
 ```text
 Dataset file: online_retail_II.csv
@@ -933,13 +973,13 @@ SQL: SELECT COUNT(*) FROM country_timezones
 
 === Verification 2: full contents (ORDER BY country) ===
 SQL: SELECT * FROM country_timezones ORDER BY country
-  Australia = Australia/Lord_Howe
+  Australia = Australia/Sydney
   Austria = Europe/Vienna
   Bahrain = Asia/Bahrain
   Belgium = Europe/Brussels
   Bermuda = Atlantic/Bermuda
-  Brazil = America/Noronha
-  Canada = America/St_Johns
+  Brazil = America/Sao_Paulo
+  Canada = America/Toronto
   Channel Islands = UTC
   Cyprus = Asia/Nicosia
   Czech Republic = Europe/Prague
@@ -984,6 +1024,14 @@ non-country values (`Channel Islands`, `European Community`, `Unspecified`,
 The four UTC fallback names are exactly the dataset rows whose `Country` value
 is not a real country.
 
+Relative to the pre-override run of this same script, **exactly three rows
+changed**, all produced by `_COUNTRY_TIMEZONE_OVERRIDES`:
+`Australia = Australia/Lord_Howe` → `Australia/Sydney`,
+`Canada = America/St_Johns` → `America/Toronto` and
+`Brazil = America/Noronha` → `America/Sao_Paulo`. The other 40 rows are
+byte-for-byte identical to the earlier output above, so nothing else in the
+mapping moved.
+
 ---
 
 ## 10. Commit History
@@ -991,6 +1039,7 @@ is not a real country.
 Full `git log --oneline` output (most recent first):
 
 ```text
+431b1e3 Add library-based country-to-timezone mapping (pycountry/pytz) and populate country_timezones table.
 966c445 Add data loading script and populate transactions table.
 107b518 Add data transformation logic (raw CSV to schema-ready DataFrame).
 7b83881 Add CHECK constraint enforcing line_item_type domain.

@@ -3,7 +3,8 @@
 This module resolves the ``Country`` column values found in the raw retail
 dataset (43 distinct values, see ``reports/data_profile.md``) against real ISO
 3166 data using :mod:`pycountry`, then picks each resolved country's primary
-timezone from :mod:`pytz`. It is the data source that backs the
+timezone (pytz's first entry for its alpha-2 code, apart from three explicit
+multi-zone overrides). It is the data source that backs the
 ``country_timezones`` table (see ``db/schema.sql`` and the timezone-handling
 requirement in ``DESIGN_LOG.md`` section 1.6).
 
@@ -27,10 +28,18 @@ Resolution algorithm, per input name (in order):
    exactly the four ambiguous/non-country values ``Channel Islands``,
    ``European Community``, ``Unspecified`` and ``West Indies``.
 
-The "primary" timezone for a resolved country is the first entry of
+The "primary" timezone for a resolved country is normally the first entry of
 ``pytz.country_timezones[country.alpha_2]`` -- i.e. pytz's IANA zone.tab
-ordering for that country (the load-layer contract for this table). Timezone
-values therefore come from pytz, never from a hardcoded per-country list.
+ordering for that country (the load-layer contract for this table). Three
+multi-zone countries in this dataset are explicit exceptions:
+``_COUNTRY_TIMEZONE_OVERRIDES`` maps ``Australia`` -> ``Australia/Sydney``,
+``Canada`` -> ``America/Toronto`` and ``Brazil`` -> ``America/Sao_Paulo``, and
+that map is checked right after a name resolves to a real country, before the
+pytz first-entry logic runs. pytz's zone.tab ordering is not population or
+business-relevance based, so for those three countries its first entry is an
+outlier region (Lord Howe Island, St. John's, Noronha) rather than the
+country's main business zone; the override exists so the map carries the
+expected primary zone. Every other resolved country still comes from pytz.
 """
 
 from __future__ import annotations
@@ -52,6 +61,22 @@ logger = logging.getLogger(__name__)
 _DATASET_COUNTRY_ALIASES = {
     "EIRE": "IE",
     "Korea": "KR",
+}
+
+# Explicit IANA-timezone overrides, checked after a dataset country name has
+# resolved to a real country and before the pytz first-entry fallback runs.
+# ``pytz.country_timezones`` ordering follows IANA zone.tab, which is not sorted
+# by population or business relevance. For the three multi-zone countries below,
+# zone.tab's first entry is an outlier region rather than the country's primary
+# business zone (``Australia/Lord_Howe`` vs Sydney, ``America/St_Johns`` vs
+# Toronto, ``America/Noronha`` vs Sao Paulo), so those names map to the expected
+# zone directly while every other resolved country still comes from pytz. Keys
+# are the dataset's Country-column values (which for these three equal their
+# pycountry country names). See DESIGN_LOG.md section 11 ("Correction to §11").
+_COUNTRY_TIMEZONE_OVERRIDES = {
+    "Australia": "Australia/Sydney",
+    "Canada": "America/Toronto",
+    "Brazil": "America/Sao_Paulo",
 }
 
 
@@ -97,9 +122,11 @@ def build_country_timezone_map(country_names: list[str]) -> dict[str, str]:
     """Map each country name in ``country_names`` to an IANA timezone string.
 
     Every name is resolved with the four-step algorithm in the module
-    docstring. Resolved countries map to ``pytz.country_timezones``' first
-    entry for their ISO alpha-2 code; names that cannot be resolved at all map
-    to ``"UTC"`` and are logged as fallbacks. The returned dict has one entry
+    docstring. A resolved name that is a key of the module's
+    ``_COUNTRY_TIMEZONE_OVERRIDES`` maps to that override value directly;
+    every other resolved name maps to ``pytz.country_timezones``' first entry
+    for its ISO alpha-2 code. Names that cannot be resolved at all map to
+    ``"UTC"`` and are logged as fallbacks. The returned dict has one entry
     per input name (duplicate/blank inputs collapse to the last value seen).
     """
     result: dict[str, str] = {}
@@ -118,25 +145,38 @@ def build_country_timezone_map(country_names: list[str]) -> dict[str, str]:
             result[name] = "UTC"
             continue
 
+        alpha_2 = country.alpha_2
+        override_timezone = _COUNTRY_TIMEZONE_OVERRIDES.get(name)
+        if override_timezone is not None:
+            result[name] = override_timezone
+            logger.debug(
+                "Mapped %r -> %s (override, %s, alpha_2=%s).",
+                name,
+                override_timezone,
+                method,
+                alpha_2,
+            )
+            continue
+
         try:
-            timezones = pytz.country_timezones[country.alpha_2]
+            timezones = pytz.country_timezones[alpha_2]
         except KeyError as exc:  # pragma: no cover - every ISO country used here exists in pytz
             raise RuntimeError(
-                f"Resolved {name!r} to {country.alpha_2} but pytz has no timezone "
+                f"Resolved {name!r} to {alpha_2} but pytz has no timezone "
                 "entry for that country code."
             ) from exc
         if not timezones:  # pragma: no cover - pytz lists are never empty
             raise RuntimeError(
-                f"Resolved {name!r} to {country.alpha_2} but pytz returned an "
+                f"Resolved {name!r} to {alpha_2} but pytz returned an "
                 "empty timezone list."
             )
 
         result[name] = timezones[0]
         logger.debug(
-            "Mapped %r -> %s (%s, alpha_2=%s).",
+            "Mapped %r -> %s (pytz default, %s, alpha_2=%s).",
             name,
             timezones[0],
             method,
-            country.alpha_2,
+            alpha_2,
         )
     return result
