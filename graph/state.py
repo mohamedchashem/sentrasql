@@ -219,6 +219,10 @@ class GraphState(BaseModel):
             terms); empty string by default when no normalization was needed.
         query_intent: Parsed intent of the query, or ``None`` until parsing
             completes (or if parsing fails).
+        intent_extraction_retried: Whether ``extract_query_intent`` (Node 2)
+            needed its one retry attempt. Defaults to ``False``; set to
+            ``True`` only when a retry actually occurs (DESIGN_LOG.md section
+            16), kept visible/inspectable rather than silently smoothed over.
         applicable_rules: Ordered list of rules that should be applied to this
             query. Empty by default.
         sql_main: The primary SQL statement answering the query; ``None`` until
@@ -242,6 +246,7 @@ class GraphState(BaseModel):
     detected_language: str = "en"
     normalized_query: str = ""
     query_intent: QueryIntent | None = None
+    intent_extraction_retried: bool = False
     applicable_rules: list[RuleName] = Field(default_factory=list)
     sql_main: str | None = None
     sql_companions: dict[RuleName, CompanionQuery] = Field(default_factory=dict)

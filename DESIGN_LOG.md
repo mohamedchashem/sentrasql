@@ -291,3 +291,17 @@ Add a new, fully detailed entry (not a compressed bullet) every time a genuine d
 **Retry policy — the retry attempt reuses the exact same call configuration as the first attempt**, including `"thinking": {"type": "disabled"}` when required for the model in use (see operational note below) — not a fresh or differently-configured call. Retry occurrence is recorded via `state.intent_extraction_retried: bool`, kept visible/inspectable rather than silently smoothed over.
 
 **Operational note, confirmed live:** for `deepseek-v4-pro` (and any model where thinking mode defaults on), `"thinking": {"type": "disabled"}` must be explicitly sent whenever `tool_choice="required"` is used, or the call fails with HTTP 400 ("Thinking mode does not support this tool_choice"). This is a required, tested configuration detail for this node's implementation, not something to be rediscovered later as a mysterious failure.
+
+
+
+## 17. Correction to §16: nullable-union rejection is syntax-specific, confirmed via controlled A/B test
+
+Live A/B testing (same request body, same endpoint, only the `group_by` field's schema fragment swapped) confirms: DeepSeek's strict-mode validator rejects a JSON-Schema `"type": ["array", "null"]` list-valued type keyword (HTTP 400, error: "unknown variant `array`, expected one of `string`, `number`, `integer`, `boolean`, `null`") — its parser only accepts scalar `type` values. It does NOT reject an `anyOf`-style nullable union (`anyOf: [{type: array}, {type: null}]`) — that construct returns HTTP 200 and the model reliably emits `null` when nothing is grouped.
+
+Pydantic v2 generates `anyOf`, not a list-valued `type`, for `Optional[list[str]]` — meaning `QueryIntent.group_by`'s existing `list[str] | None` typing is safe and functions correctly as-is; it was never actually broken by the constraint §16 identified.
+
+**§16's Finding 2 is corrected, not retracted: the underlying finding (strict mode rejects some nullable representations) was real and reproducible — the error was in generalizing it to "all nullable optional fields," when it was specific to one JSON-Schema spelling that Pydantic doesn't even produce.**
+
+**The `Filters` restructuring (typed `present`-flag sub-objects) is kept as-built, for a reason independent of this correction:** its value was never contingent on avoiding a schema-level rejection — it was about not relying on the model being *consistent* about null/empty/omitted for equivalent "nothing here" states, given the separately-confirmed finding that strict mode does not validate output *values* at all (§16 Finding 1), only output shape. A schema being accepted doesn't guarantee consistent model behavior through it.
+
+**Separate issue surfaced during this verification, needs its own fix:** the live call in `graph/llm.py` was found to actually route to `/v1/chat/completions`, not `/beta/chat/completions`, despite `with_structured_output(..., strict=True)` and the bound model reporting `api_base=.../beta` — a routing defect in the current `langchain-deepseek` integration (a shared-client artifact), not a finding about DeepSeek's API itself. This needs to be fixed before relying on strict-mode enforcement in production calls, since `/v1` may not apply the same (weak) validation guarantees `/beta` does.

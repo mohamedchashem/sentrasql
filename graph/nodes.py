@@ -27,6 +27,18 @@ guardrail-enforced (row-limited) SQL and truncation flag back onto the state
 ``CompanionQuery.sql`` / ``.truncated`` per companion) with
 ``guardrail_status = "passed"``.
 
+``extract_query_intent`` (Node 2) is now implemented: it assembles the stable
+system prompt (``graph.system_prompt.build_system_prompt``) from the query
+text, invokes the strict structured-output model (``graph.llm.get_intent_model``),
+runs the result through post-parse normalization/validation
+(``graph.intent_normalizer.normalize_and_validate_intent``), and stores the
+normalized intent in ``state.query_intent``. Any failure -- a model/parse
+exception or a normalization reason -- triggers exactly one retry reusing the
+identical call configuration (recorded via ``state.intent_extraction_retried``);
+a second failure sets ``state.error`` to
+``intent_extraction_failed:<underlying_reason>`` and never sets
+``state.query_intent``.
+
 Before any SQL is constructed, ``compile_sql`` runs four early-validation
 gates against ``query_intent``: aggregation/metric compatibility, group-by
 validity against the live schema, filter sanity (date-range ordering and
@@ -44,9 +56,12 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlglot import exp
+from langchain_core.messages import SystemMessage
 
 from db.connect import connect_readonly
 from db.guardrails import validate_sql
+from graph.intent_normalizer import normalize_and_validate_intent
+from graph.llm import get_intent_model
 from graph.state import (
     CompanionQuery,
     Filters,
@@ -54,12 +69,92 @@ from graph.state import (
     QueryIntent,
     RuleName,
 )
+from graph.system_prompt import build_system_prompt
 
 
 def extract_query_intent(state: GraphState) -> GraphState:
-    """Node 2. LLM call. Takes state.normalized_query and the live DB schema, produces a QueryIntent (aggregation, metric, group_by, filters, output_format, assumptions) and stores it in state.query_intent. Does not generate SQL. Populates assumptions only when genuine interpretive ambiguity was resolved; an empty list is a normal, valid result and must not be treated as a field that always needs content."""
+    """Node 2. LLM call.
 
-    # TODO: implement
+    Assembles the stable system prompt from the query text, invokes the strict
+    structured-output model, runs the parsed intent through post-parse
+    normalization/validation, and stores the normalized intent in
+    ``state.query_intent``. This node contains no new prompt content and no
+    new normalization logic -- it only wires the independently-built pieces
+    (``build_system_prompt``, ``get_intent_model``,
+    ``normalize_and_validate_intent``) plus the retry/error routing.
+
+    Error passthrough mirrors ``validate_guardrails``: a state that already
+    carries ``state.error`` is returned completely untouched (no prompt
+    build, no model call).
+
+    Retry policy (DESIGN_LOG.md section 16): any failure -- a model/parse
+    exception or a normalization reason -- is retried exactly once with the
+    *identical* call configuration (same prompt text, same messages, same
+    model object), and the retry is recorded via
+    ``state.intent_extraction_retried``. A second failure sets
+    ``state.error`` to ``intent_extraction_failed:<underlying_reason>`` and
+    never sets ``state.query_intent``.
+
+    The query text used is ``state.normalized_query`` when non-empty, falling
+    back to ``state.raw_query``: language normalization is a deferred v1
+    feature, so in the current graph the entry state only ever carries
+    ``raw_query``.
+    """
+
+    # Error passthrough: never touch a state already routing toward the error
+    # path -- no prompt build, no model call, no field mutation.
+    if state.error is not None:
+        return state
+
+    # The v1 graph entry carries only raw_query (language normalization is
+    # deferred); once a normalization node exists it populates
+    # normalized_query and this preference automatically takes effect.
+    query_text = state.normalized_query if state.normalized_query else state.raw_query
+
+    # Build the prompt once and reuse the identical messages for both
+    # attempts: build_system_prompt is deterministic, and the retry must reuse
+    # the exact same call configuration -- never a fresh/different attempt.
+    prompt = build_system_prompt(query_text)
+    model = get_intent_model()
+    messages = [SystemMessage(content=prompt)]
+
+    def _attempt() -> tuple[QueryIntent | None, str | None]:
+        """Run one extraction attempt. Returns (intent, None) or (None, reason).
+
+        ``reason`` is the underlying failure detail in machine-readable form:
+        an exception's class name for a model/parse failure, the qualified
+        name of an unexpected return type, or the exact
+        ``intent_inconsistency:...`` reason from ``normalize_and_validate_intent``.
+        """
+        try:
+            intent = model.invoke(messages)
+        except Exception as exc:  # network error, timeout, structural parse failure
+            return None, type(exc).__name__
+        if not isinstance(intent, QueryIntent):
+            return (
+                None,
+                "unexpected_result_type:"
+                f"{type(intent).__module__}.{type(intent).__name__}",
+            )
+        normalized, reason = normalize_and_validate_intent(intent)
+        if reason is not None:
+            return None, reason
+        return normalized, None
+
+    intent, failure_reason = _attempt()
+    if failure_reason is None:
+        state.query_intent = intent
+        return state
+
+    # First attempt failed -> exactly one retry, identical configuration.
+    state.intent_extraction_retried = True
+    intent, failure_reason = _attempt()
+    if failure_reason is None:
+        state.query_intent = intent
+        return state
+
+    # Second failure: route to the error path and never set query_intent.
+    state.error = f"intent_extraction_failed:{failure_reason}"
     return state
 
 
