@@ -48,6 +48,80 @@ class Assumption(BaseModel):
     resolution: str
 
 
+class DateRangeFilter(BaseModel):
+    """Optional start/end boundary pair for a date/time-range filter.
+
+    A date-range filter is two independent, optional boundaries rather than one
+    required start-and-end object, so half-open ranges such as "since March"
+    (start present, end absent) or "before December" (end present, start
+    absent) are representable. Presence is carried per boundary by an explicit
+    ``*_present`` bool -- never by a sentinel value: an empty ``start`` string
+    does NOT mean "no start". When a ``*_present`` flag is ``False`` the
+    paired value field stays at its default empty string and must not be read.
+
+    Attributes:
+        start_present: Whether a start boundary was requested. Defaults to
+            ``False`` (range open on the start side).
+        start: The start boundary as an ISO-8601 string. Meaningful only when
+            ``start_present`` is ``True``; otherwise it is the default empty
+            string.
+        end_present: Whether an end boundary was requested. Defaults to
+            ``False`` (range open on the end side).
+        end: The end boundary as an ISO-8601 string. Meaningful only when
+            ``end_present`` is ``True``; otherwise it is the default empty
+            string.
+    """
+
+    start_present: bool = False
+    start: str = ""
+    end_present: bool = False
+    end: str = ""
+
+
+class CountryFilter(BaseModel):
+    """Optional equality constraint on the ``country`` dimension.
+
+    A scalar filter uses one explicit ``present`` flag paired with the value,
+    instead of the per-boundary start/end split a range filter needs. As with
+    every ``*_present`` flag in this schema, ``present`` is the source of truth
+    -- an empty ``value`` string does NOT mean "no country filter". When
+    ``present`` is ``False`` the value stays at its default empty string and
+    must not be read.
+
+    Attributes:
+        present: Whether a country constraint was requested. Defaults to
+            ``False`` (no country filter).
+        value: The exact country name to filter on. Meaningful only when
+            ``present`` is ``True``; otherwise it is the default empty string.
+    """
+
+    present: bool = False
+    value: str = ""
+
+
+class Filters(BaseModel):
+    """Typed filter constraints carried by a query intent.
+
+    This replaces ``QueryIntent.filters``'s former loose-dict shape with
+    explicit per-kind sub-objects (DESIGN_LOG.md section 16): each filter kind
+    this system supports today is its own typed field, and absence is always
+    encoded by that kind's own present flag(s) at their ``False`` default --
+    never by ``None``, an omitted key, or a sentinel value such as an empty
+    string. Adding a new filter kind is a deliberate schema extension (a new
+    typed field), not a free-form dict entry.
+
+    Attributes:
+        date_range: Optional date/time-range constraint. Defaults to a fully
+            open range (both ``*_present`` flags ``False``), i.e. no date
+            filter.
+        country: Optional country-equality constraint. Defaults to
+            ``present=False``, i.e. no country filter.
+    """
+
+    date_range: DateRangeFilter = Field(default_factory=DateRangeFilter)
+    country: CountryFilter = Field(default_factory=CountryFilter)
+
+
 class QueryIntent(BaseModel):
     """Structured, validated interpretation of the user's analytics question.
 
@@ -65,8 +139,11 @@ class QueryIntent(BaseModel):
             opposed to a plain row count.
         group_by: Optional columns to group results by. ``None`` (the default)
             means the query is not grouped.
-        filters: Canonical filter constraints to apply, mapping filter/column
-            names to their values. Empty by default (no filters).
+        filters: Canonical filter constraints to apply, always present as a
+            typed ``Filters`` object. Each filter kind is an explicit typed
+            field carrying its own ``*_present`` flag(s) (see ``Filters``);
+            the default all-``False`` object means no filters. Never a loose
+            dict, ``None``, or a sentinel-value encoding.
         net_gross: Which named revenue/quantity filter variant the query asks
             for, resolved by the NET_VS_GROSS rule. Exactly one of
             "net" (the default; sum signed amounts as recorded, no extra
@@ -85,7 +162,7 @@ class QueryIntent(BaseModel):
     metric: Literal["revenue", "quantity", "unit_price", "customer_id"]
     distinct: bool = False
     group_by: list[str] | None = None
-    filters: dict = Field(default_factory=dict)
+    filters: Filters = Field(default_factory=Filters)
     net_gross: Literal["net", "gross_of_cancellations", "returns"] = "net"
     output_format: Literal["chat", "report"] = "chat"
     assumptions: list[Assumption] = Field(default_factory=list)

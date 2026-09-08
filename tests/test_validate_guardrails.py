@@ -54,7 +54,14 @@ from unittest import mock
 
 from graph import nodes as nodes_module
 from graph.nodes import validate_guardrails
-from graph.state import CompanionQuery, GraphState, QueryIntent, RuleName
+from graph.state import (
+    CompanionQuery,
+    CountryFilter,
+    Filters,
+    GraphState,
+    QueryIntent,
+    RuleName,
+)
 
 
 class ValidateGuardrailsErrorPassthroughTest(unittest.TestCase):
@@ -68,7 +75,9 @@ class ValidateGuardrailsErrorPassthroughTest(unittest.TestCase):
         intent = QueryIntent(
             aggregation="sum",
             metric="revenue",
-            filters={"country": "United Kingdom"},
+            filters=Filters(
+                country=CountryFilter(present=True, value="United Kingdom")
+            ),
             net_gross="gross_of_cancellations",
         )
         state = GraphState(

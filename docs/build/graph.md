@@ -399,3 +399,12 @@ On full success: `guardrail_status = "passed"`, `state.sql_main` and every compa
 107 tests total across `tests/test_compile_sql.py`, `tests/test_detect_applicable_rules.py`, `tests/test_validate_guardrails.py`.
 
 **Schema additions from this work cycle** (see DESIGN_LOG.md §14): `GraphState.main_truncated: bool` and `CompanionQuery.truncated: bool` — closing the open truncation-disclosure composability question from §12. Decision: main-query and companion-query truncation are independent, composable disclosure sources, same pattern as the four policy rules.
+
+
+## QueryIntent.filters Restructuring — Complete
+
+`QueryIntent.filters` was restructured from a loose dict into typed sub-objects (`Filters` containing `date_range: DateRangeFilter` and `country: CountryFilter`), each following an explicit `present`-flag convention rather than dict-key existence or sentinel values — required after live-verifying that DeepSeek's strict function-calling mode rejects nullable union types at the API level (see DESIGN_LOG.md §16). `DateRangeFilter` uses independent per-boundary flags (`start_present`/`end_present`), not one flag over the whole range, to correctly represent partial ranges like "since March."
+
+This change propagated to both consumers designed against the old shape: `compile_sql`'s WHERE-clause construction and its early-validation gates (date-range ordering, no-matching-data) now check `.present`/`.*_present` flags explicitly instead of dict iteration; `detect_applicable_rules` required no changes, since its integration tests only invoke `compile_sql` rather than duplicating filter-access logic.
+
+Full regression: 107/107 tests passing across all three test modules (`test_compile_sql.py`, `test_detect_applicable_rules.py`, `test_validate_guardrails.py`), confirming the restructuring introduced no unintended behavior change beyond the filter-shape migration itself.

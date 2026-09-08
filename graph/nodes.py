@@ -47,7 +47,13 @@ from sqlglot import exp
 
 from db.connect import connect_readonly
 from db.guardrails import validate_sql
-from graph.state import CompanionQuery, GraphState, QueryIntent, RuleName
+from graph.state import (
+    CompanionQuery,
+    Filters,
+    GraphState,
+    QueryIntent,
+    RuleName,
+)
 
 
 def extract_query_intent(state: GraphState) -> GraphState:
@@ -195,6 +201,13 @@ _TRANSACTIONS_COLUMNS = frozenset(
     }
 )
 
+# The single time/datetime column a date-range filter constrains. The typed
+# ``DateRangeFilter`` carries no column name -- the filter kind itself implies
+# its target, because ``transactions`` has exactly one ISO-8601 time column
+# (``invoice_timestamp``). This fixed binding lives here rather than being
+# spelled inline in every condition builder that consumes a date range.
+_DATE_FILTER_COLUMN = "invoice_timestamp"
+
 # Canonical derived metrics: business measures that are not a single column but
 # a fixed expression over transactions columns. ``revenue`` is line amount
 # (quantity * unit_price), summed over signed quantities exactly as recorded --
@@ -317,29 +330,40 @@ def _literal(value: object) -> exp.Expression:
     raise ValueError(f"Unsupported filter literal {value!r} of type {type(value).__name__}.")
 
 
-def _filter_conditions(filters: dict) -> list[exp.Condition]:
-    """Compile ``query_intent.filters`` into a list of sqlglot conditions.
+def _filter_conditions(filters: Filters) -> list[exp.Condition]:
+    """Compile ``query_intent.filters`` (a typed ``Filters`` object) into SQL conditions.
 
-    The base-case contract for the ``filters`` dict maps a column name to its
-    value: a scalar means equality, ``None`` means ``IS NULL``, and a list of
-    scalars means ``IN (...)``. (Operator-carrying filter encodings such as the
-    ones the rule-specific tasks need for ``NOT LIKE`` / ``<`` negations are not
-    part of this contract yet.) Multiple entries are returned as separate
-    conditions so callers keep them distinguishable; ``Select.where`` ANDs them.
+    Each filter kind is read through its own ``*_present`` flag before its
+    paired value is read -- never through the value itself, and never by
+    iterating the object like a dict. Each kind contributes its conditions
+    independently and each condition is returned separately so callers keep
+    them distinguishable; ``Select.where`` ANDs them. A present country filter
+    compiles to one equality on the ``country`` column. A date-range filter
+    compiles to zero, one, or two boundary comparisons against the single time
+    column (``_DATE_FILTER_COLUMN``) depending on which boundaries are
+    present, which is what makes half-open ranges like "since March" (start
+    present, end absent) or "before December" (end present, start absent)
+    representable.
     """
     conditions: list[exp.Condition] = []
-    for name, value in filters.items():
-        column = _column(name)
-        if isinstance(value, list):
-            if not value:
-                raise ValueError(f"Empty IN-list for filter column {name!r}.")
-            conditions.append(
-                exp.In(this=column, expressions=[_literal(item) for item in value])
+    if filters.country.present:
+        conditions.append(
+            exp.EQ(this=_column("country"), expression=_literal(filters.country.value))
+        )
+    if filters.date_range.start_present:
+        conditions.append(
+            exp.GTE(
+                this=_column(_DATE_FILTER_COLUMN),
+                expression=_literal(filters.date_range.start),
             )
-        elif value is None:
-            conditions.append(exp.Is(this=column, expression=exp.Null()))
-        else:
-            conditions.append(exp.EQ(this=column, expression=_literal(value)))
+        )
+    if filters.date_range.end_present:
+        conditions.append(
+            exp.LTE(
+                this=_column(_DATE_FILTER_COLUMN),
+                expression=_literal(filters.date_range.end),
+            )
+        )
     return conditions
 
 
@@ -443,11 +467,6 @@ def _count_excluded_select(
     return query
 
 
-def _is_scalar_filter_value(value: object) -> bool:
-    """Return True for a plain equality filter value (not None/list/dict)."""
-    return value is not None and not isinstance(value, (list, dict))
-
-
 def _parse_filter_datetime(value: object) -> datetime:
     """Parse an ISO-8601 date/datetime string into a ``datetime``.
 
@@ -536,35 +555,32 @@ def _invalid_group_by_error(
     return None
 
 
-def _invalid_date_range_error(filters: dict) -> str | None:
-    """Return the invalid-date-range reason when a range filter is reversed.
+def _invalid_date_range_error(filters: Filters) -> str | None:
+    """Return the invalid-date-range reason when a full range filter is reversed.
 
-    A dict-valued filter on a column is the date-range encoding: it must carry
-    exactly ``start`` and ``end`` ISO-8601 endpoints. A range whose start is
-    later than its end is a hard failure -- never silently swapped.
+    A date-range filter's two boundaries are independent (each carries its own
+    ``*_present`` flag), so ordering only exists when both are present: a
+    partial range -- start present and end absent, or the reverse -- cannot be
+    reversed and always passes this gate. When both boundaries are present and
+    the start is later than the end, it is a hard failure -- never silently
+    swapped.
     """
-    for name, value in filters.items():
-        if not isinstance(value, dict):
-            continue
-        if set(value) != {"start", "end"}:
-            raise ValueError(
-                f"Unsupported filter value for column {name!r}: a dict filter "
-                "must be a date range with exactly 'start' and 'end' keys "
-                f"(got {sorted(value)})."
-            )
-        start = _parse_filter_datetime(value["start"])
-        end = _parse_filter_datetime(value["end"])
-        if start > end:
-            return _INVALID_DATE_RANGE_REASON
+    date_range = filters.date_range
+    if not (date_range.start_present and date_range.end_present):
+        return None
+    start = _parse_filter_datetime(date_range.start)
+    end = _parse_filter_datetime(date_range.end)
+    if start > end:
+        return _INVALID_DATE_RANGE_REASON
     return None
 
 
 def _no_matching_data_error(
-    filters: dict,
+    filters: Filters,
     live_columns: set[str],
     conn: sqlite3.Connection,
 ) -> str | None:
-    """Return the no-matching-data reason when a filter value matches nothing.
+    """Return the no-matching-data reason when a country filter matches nothing.
 
     Deliberate v1 scope decision, not an oversight: when an exact scalar filter
     value matches no real row the query is refused outright. There is no fuzzy
@@ -572,18 +588,18 @@ def _no_matching_data_error(
     auto-corrected -- and a genuinely zero-answer filter (e.g. a real country
     with no sales in the data) is refused for the same reason, because the
     system cannot distinguish a near-miss from a real zero-cohort value.
-    IN-list members, IS NULL, and date-range endpoints are deliberately NOT
-    existence-gated in v1.
+    Existence is gated per filter kind: only the scalar country filter (when
+    its ``present`` flag is ``True``) is checked against the live rows.
+    Date-range endpoints are deliberately NOT existence-gated in v1.
     """
-    for name, value in filters.items():
-        if not _is_scalar_filter_value(value) or name not in live_columns:
-            continue
-        row = conn.execute(
-            f"SELECT 1 FROM {_MAIN_TABLE} WHERE {name} = ? LIMIT 1",
-            (value,),
-        ).fetchone()
-        if row is None:
-            return _NO_MATCHING_DATA_REASON
+    if not filters.country.present or "country" not in live_columns:
+        return None
+    row = conn.execute(
+        f"SELECT 1 FROM {_MAIN_TABLE} WHERE country = ? LIMIT 1",
+        (filters.country.value,),
+    ).fetchone()
+    if row is None:
+        return _NO_MATCHING_DATA_REASON
     return None
 
 
@@ -623,9 +639,7 @@ def _validate_intent(
     if reason is not None:
         return reason
 
-    needs_live_db = bool(intent.group_by) or any(
-        _is_scalar_filter_value(value) for value in intent.filters.values()
-    )
+    needs_live_db = bool(intent.group_by) or intent.filters.country.present
     if needs_live_db:
         conn = connect_readonly(_MAIN_DB_PATH)
         try:

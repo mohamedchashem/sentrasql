@@ -59,7 +59,14 @@ from sqlglot import exp, parse
 from db.connect import connect_readonly
 from db.guardrails import validate_sql
 from graph.nodes import compile_sql
-from graph.state import GraphState, QueryIntent, RuleName
+from graph.state import (
+    CountryFilter,
+    DateRangeFilter,
+    Filters,
+    GraphState,
+    QueryIntent,
+    RuleName,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DB_PATH = _PROJECT_ROOT / "data" / "processed" / "sentrasql.db"
@@ -86,7 +93,7 @@ def _compile(
     aggregation: str = "sum",
     metric: str = "revenue",
     group_by: list[str] | None = None,
-    filters: dict | None = None,
+    filters: Filters | None = None,
     rules: list[RuleName] | None = None,
     net_gross: str = "net",
 ) -> GraphState:
@@ -107,12 +114,29 @@ def _compile(
             aggregation=aggregation,
             metric=metric,
             group_by=group_by,
-            filters=filters or {},
+            filters=filters or Filters(),
             net_gross=net_gross,
         ),
         applicable_rules=rules or [],
     )
     return compile_sql(state)
+
+
+def _country_filters(country: str) -> Filters:
+    """Build the typed ``Filters`` carrying only a present country equality."""
+    return Filters(country=CountryFilter(present=True, value=country))
+
+
+def _date_range_filters(start: str, end: str) -> Filters:
+    """Build the typed ``Filters`` carrying a fully-present date range."""
+    return Filters(
+        date_range=DateRangeFilter(
+            start_present=True,
+            start=start,
+            end_present=True,
+            end=end,
+        )
+    )
 
 
 class CompileSqlBaseCaseTest(unittest.TestCase):
@@ -134,7 +158,7 @@ class CompileSqlBaseCaseTest(unittest.TestCase):
         self.assertEqual(state.sql_companions, {})
 
     def test_total_revenue_filtered_to_one_country(self):
-        state = _compile(filters={"country": "United Kingdom"})
+        state = _compile(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
@@ -211,7 +235,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         # must be AND-ed onto the existing filters, never replace them. The
         # country filter has nothing to do with the zero-price rule, so its
         # presence in the same WHERE clause proves both survive together.
-        state = self._compile_avg(filters={"country": "United Kingdom"})
+        state = self._compile_avg(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
@@ -314,7 +338,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         # must be AND-ed onto the existing filters, never replace them. The
         # country filter has nothing to do with the null-customer rule, so its
         # presence in the same WHERE clause proves both survive together.
-        state = self._compile_customer(filters={"country": "United Kingdom"})
+        state = self._compile_customer(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
@@ -424,7 +448,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         # must be AND-ed onto the existing filters, never replace them. The
         # country filter has nothing to do with the non-product rule, so its
         # presence in the same WHERE clause proves both survive together.
-        state = self._compile_product(filters={"country": "United Kingdom"})
+        state = self._compile_product(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
@@ -543,7 +567,7 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
         # The unrelated country filter must survive alongside *both* rule
         # negations: AND-composition onto the existing filters, never
         # replacement of them.
-        state = self._compile_both(filters={"country": "United Kingdom"})
+        state = self._compile_both(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
@@ -588,7 +612,7 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
         state = _compile(
             aggregation="avg",
             metric="unit_price",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             rules=[
                 RuleName.CUSTOMER_EXCLUDE_NULL,
                 RuleName.AVG_EXCLUDE_ZERO_PRICE,
@@ -677,7 +701,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
         # The unrelated country filter must survive alongside *all three* rule
         # negations: AND-composition onto the existing filters, never
         # replacement of them.
-        state = self._compile_three(filters={"country": "United Kingdom"})
+        state = self._compile_three(filters=_country_filters("United Kingdom"))
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
@@ -728,7 +752,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
         state = _compile(
             aggregation="avg",
             metric="unit_price",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             rules=[
                 RuleName.AVG_EXCLUDE_ZERO_PRICE,
                 RuleName.PRODUCT_EXCLUDE_NONPRODUCT,
@@ -776,7 +800,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
         state = _compile(
             aggregation="avg",
             metric="unit_price",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             rules=[
                 RuleName.PRODUCT_EXCLUDE_NONPRODUCT,
                 RuleName.CUSTOMER_EXCLUDE_NULL,
@@ -831,7 +855,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
     def _compile_net_vs_gross(
         self,
         net_gross: str,
-        filters: dict | None = None,
+        filters: Filters | None = None,
         extra_rules: list[RuleName] | None = None,
     ) -> GraphState:
         rules = [self.RULE] + list(extra_rules or [])
@@ -856,7 +880,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
 
     def test_default_net_variant_keeps_only_the_users_own_filters(self):
         state = self._compile_net_vs_gross(
-            "net", filters={"country": "United Kingdom"}
+            "net", filters=_country_filters("United Kingdom")
         )
         self.assertEqual(
             state.sql_main,
@@ -889,7 +913,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
 
     def test_gross_of_cancellations_variant_keeps_user_filter_and_ands(self):
         state = self._compile_net_vs_gross(
-            "gross_of_cancellations", filters={"country": "United Kingdom"}
+            "gross_of_cancellations", filters=_country_filters("United Kingdom")
         )
         self.assertEqual(
             state.sql_main,
@@ -924,7 +948,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
 
     def test_returns_variant_keeps_user_filter_and_ands(self):
         state = self._compile_net_vs_gross(
-            "returns", filters={"country": "United Kingdom"}
+            "returns", filters=_country_filters("United Kingdom")
         )
         self.assertEqual(
             state.sql_main,
@@ -949,7 +973,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         # net variant's WHERE must be exactly the user's own filter (no extra
         # ANDed condition), while each named variant adds exactly its own one
         # condition. This is the "genuinely no extra WHERE clause" contract.
-        filters = {"country": "United Kingdom"}
+        filters = _country_filters("United Kingdom")
         net_state = self._compile_net_vs_gross("net", filters=filters)
         gross_state = self._compile_net_vs_gross(
             "gross_of_cancellations", filters=filters
@@ -1000,7 +1024,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         # for the exclusion rule -- never for NET_VS_GROSS.
         state = self._compile_net_vs_gross(
             "gross_of_cancellations",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             extra_rules=[RuleName.AVG_EXCLUDE_ZERO_PRICE],
         )
         self.assertEqual(
@@ -1022,7 +1046,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
     def test_returns_variant_composes_with_product_exclusion_rule(self):
         state = self._compile_net_vs_gross(
             "returns",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             extra_rules=[RuleName.PRODUCT_EXCLUDE_NONPRODUCT],
         )
         self.assertEqual(
@@ -1047,7 +1071,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         # negation and companion appear exactly as if NET_VS_GROSS were absent.
         state = self._compile_net_vs_gross(
             "net",
-            filters={"country": "United Kingdom"},
+            filters=_country_filters("United Kingdom"),
             extra_rules=[RuleName.CUSTOMER_EXCLUDE_NULL],
         )
         self.assertEqual(
@@ -1086,7 +1110,7 @@ class CompileSqlAvgExcludeZeroPriceLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str]:
         """Compile the rule-2 avg query and return the validated main/companion SQL."""
         state = _compile(
             aggregation="avg",
@@ -1126,7 +1150,7 @@ class CompileSqlAvgExcludeZeroPriceLiveDbTest(unittest.TestCase):
 
     def test_uk_country_filter_main_and_companion_execute_and_match(self):
         filters_sql = "country = 'United Kingdom'"
-        main_sql, comp_sql = self._compile(filters={"country": "United Kingdom"})
+        main_sql, comp_sql = self._compile(filters=_country_filters("United Kingdom"))
 
         main_avg = self.conn.execute(main_sql).fetchone()[0]
         # The negation must have real effect: the UK data has thousands of
@@ -1162,7 +1186,7 @@ class CompileSqlAvgExcludeZeroPriceLiveDbTest(unittest.TestCase):
         # The companion must count excluded rows for the *same* country the
         # main query scoped, not every zero-price row in the table.
         filters_sql = "country = 'Germany'"
-        _main_sql, comp_sql = self._compile(filters={"country": "Germany"})
+        _main_sql, comp_sql = self._compile(filters=_country_filters("Germany"))
 
         excluded = self.conn.execute(comp_sql).fetchone()[0]
         expected_excluded = self._reference_count(
@@ -1199,7 +1223,7 @@ class CompileSqlCustomerExcludeNullLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str]:
         """Compile the rule-3 query and return validated main/companion SQL."""
         state = _compile(
             aggregation="avg",
@@ -1241,7 +1265,7 @@ class CompileSqlCustomerExcludeNullLiveDbTest(unittest.TestCase):
 
     def test_uk_country_filter_main_and_companion_execute_and_match(self):
         filters_sql = "country = 'United Kingdom'"
-        main_sql, comp_sql = self._compile(filters={"country": "United Kingdom"})
+        main_sql, comp_sql = self._compile(filters=_country_filters("United Kingdom"))
 
         main_avg = self.conn.execute(main_sql).fetchone()[0]
         # The negation must have real effect: the UK data has hundreds of
@@ -1274,7 +1298,7 @@ class CompileSqlCustomerExcludeNullLiveDbTest(unittest.TestCase):
         # The companion must count excluded rows for the *same* country the
         # main query scoped, not every null-customer row in the table.
         filters_sql = "country = 'United Kingdom'"
-        _main_sql, comp_sql = self._compile(filters={"country": "United Kingdom"})
+        _main_sql, comp_sql = self._compile(filters=_country_filters("United Kingdom"))
 
         excluded = self.conn.execute(comp_sql).fetchone()[0]
         expected_excluded = self._reference_count(filters_sql)
@@ -1310,7 +1334,7 @@ class CompileSqlProductExcludeNonProductLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str]:
         """Compile the rule-4 query and return validated main/companion SQL."""
         state = _compile(
             aggregation="avg",
@@ -1356,7 +1380,7 @@ class CompileSqlProductExcludeNonProductLiveDbTest(unittest.TestCase):
 
     def test_uk_country_filter_main_and_companion_execute_and_match(self):
         filters_sql = "country = 'United Kingdom'"
-        main_sql, comp_sql = self._compile(filters={"country": "United Kingdom"})
+        main_sql, comp_sql = self._compile(filters=_country_filters("United Kingdom"))
 
         main_avg = self.conn.execute(main_sql).fetchone()[0]
         # The negation must have real effect: the UK data contains fee and
@@ -1389,7 +1413,7 @@ class CompileSqlProductExcludeNonProductLiveDbTest(unittest.TestCase):
         # The companion must count excluded rows for the *same* country the
         # main query scoped, not every non-product row in the table.
         filters_sql = "country = 'United Kingdom'"
-        _main_sql, comp_sql = self._compile(filters={"country": "United Kingdom"})
+        _main_sql, comp_sql = self._compile(filters=_country_filters("United Kingdom"))
 
         excluded = self.conn.execute(comp_sql).fetchone()[0]
         expected_excluded = self._reference_count(filters_sql)
@@ -1425,7 +1449,7 @@ class CompileSqlAvgAndCustomerExcludeNullLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str, str]:
         """Compile the rules-2+3 query and validate all three statements.
 
         Returns the guardrail-approved SQL in fixed order: (main query,
@@ -1460,7 +1484,7 @@ class CompileSqlAvgAndCustomerExcludeNullLiveDbTest(unittest.TestCase):
     def test_both_exclusions_apply_and_both_companions_match_reference(self):
         filters_sql = "country = 'United Kingdom'"
         main_sql, comp_zero_sql, comp_null_sql = self._compile(
-            filters={"country": "United Kingdom"}
+            filters=_country_filters("United Kingdom")
         )
 
         # The main average must reflect *both* exclusions at once: zero-price
@@ -1533,7 +1557,7 @@ class CompileSqlThreeExclusionsLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str, str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str, str, str]:
         """Compile the 2+3+4 query and validate all four statements.
 
         Returns the guardrail-approved SQL in fixed order: (main query, rule-2
@@ -1569,7 +1593,7 @@ class CompileSqlThreeExclusionsLiveDbTest(unittest.TestCase):
             comp_zero_sql,
             comp_null_sql,
             comp_nonproduct_sql,
-        ) = self._compile(filters={"country": "United Kingdom"})
+        ) = self._compile(filters=_country_filters("United Kingdom"))
 
         # The main average must reflect all three exclusions at once:
         # zero-price rows, null-customer rows, and non-product rows are all
@@ -1661,7 +1685,7 @@ class CompileSqlNetVsGrossLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, net_gross: str, filters: dict | None) -> str:
+    def _compile(self, net_gross: str, filters: Filters | None) -> str:
         """Compile the rule-1 revenue query and validate the single main SQL."""
         state = _compile(
             aggregation="sum",
@@ -1691,7 +1715,7 @@ class CompileSqlNetVsGrossLiveDbTest(unittest.TestCase):
         ).fetchone()[0]
 
     def test_net_variant_matches_the_plain_base_revenue(self):
-        main_sql = self._compile("net", filters={"country": "United Kingdom"})
+        main_sql = self._compile("net", filters=_country_filters("United Kingdom"))
         main = self.conn.execute(main_sql).fetchone()[0]
         expected = self._reference_revenue("country = 'United Kingdom'", "")
         self.assertAlmostEqual(main, expected, places=6)
@@ -1699,7 +1723,7 @@ class CompileSqlNetVsGrossLiveDbTest(unittest.TestCase):
     def test_gross_of_cancellations_executes_and_matches_reference(self):
         filters_sql = "country = 'United Kingdom'"
         main_sql = self._compile(
-            "gross_of_cancellations", filters={"country": "United Kingdom"}
+            "gross_of_cancellations", filters=_country_filters("United Kingdom")
         )
         main = self.conn.execute(main_sql).fetchone()[0]
         expected = self._reference_revenue(
@@ -1711,13 +1735,13 @@ class CompileSqlNetVsGrossLiveDbTest(unittest.TestCase):
         # cancelled invoices removes their negative line amounts from the sum,
         # so the gross total differs from the net total over the same country.
         net = self.conn.execute(
-            self._compile("net", filters={"country": "United Kingdom"})
+            self._compile("net", filters=_country_filters("United Kingdom"))
         ).fetchone()[0]
         self.assertNotAlmostEqual(main, net, places=6)
 
     def test_returns_variant_executes_and_matches_reference(self):
         filters_sql = "country = 'United Kingdom'"
-        main_sql = self._compile("returns", filters={"country": "United Kingdom"})
+        main_sql = self._compile("returns", filters=_country_filters("United Kingdom"))
         main = self.conn.execute(main_sql).fetchone()[0]
         expected = self._reference_revenue(filters_sql, "quantity < 0")
         self.assertAlmostEqual(main, expected, places=6)
@@ -1755,7 +1779,7 @@ class CompileSqlNetVsGrossAndZeroPriceLiveDbTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.conn.close()
 
-    def _compile(self, filters: dict | None) -> tuple[str, str]:
+    def _compile(self, filters: Filters | None) -> tuple[str, str]:
         """Compile the combined query and validate main + companion SQL."""
         state = _compile(
             aggregation="sum",
@@ -1783,7 +1807,7 @@ class CompileSqlNetVsGrossAndZeroPriceLiveDbTest(unittest.TestCase):
     def test_gross_revenue_excluding_zero_price_rows_executes_and_matches(self):
         filters_sql = "country = 'United Kingdom'"
         main_sql, comp_sql = self._compile(
-            filters={"country": "United Kingdom"}
+            filters=_country_filters("United Kingdom")
         )
 
         # The main total must reflect *both* the gross scope and the zero-price
@@ -1814,7 +1838,7 @@ class CompileSqlNetVsGrossAndZeroPriceLiveDbTest(unittest.TestCase):
         # rule 2 is defined for: gross scope alone (which still includes the
         # zero-price UK rows on non-cancelled invoices) must differ from gross
         # scope AND-composed with the zero-price exclusion.
-        filters = {"country": "United Kingdom"}
+        filters = _country_filters("United Kingdom")
         state = _compile(
             aggregation="avg",
             metric="unit_price",
@@ -1955,18 +1979,20 @@ class CompileSqlEarlyValidationGroupByTest(unittest.TestCase):
 class CompileSqlEarlyValidationDateRangeTest(unittest.TestCase):
     """Gate 3a: a date-range filter with start after end is a hard failure.
 
-    A dict-valued filter on a column is the date-range encoding
-    (``{start, end}`` ISO-8601 endpoints). Reversed ranges fail with
+    A date-range filter is the typed ``DateRangeFilter`` carried by
+    ``Filters.date_range``; ordering is only meaningful when both boundaries
+    are present, so a reversed full range fails with
     ``invalid_intent:invalid_date_range`` before any SQL is constructed --
-    never silently swapped. This gate is pure (no live-database read), so it
-    runs even where the database is absent.
+    never silently swapped. Partial ranges (one boundary present) cannot be
+    reversed and always pass this gate. This gate is pure (no live-database
+    read), so it runs even where the database is absent.
     """
 
     REASON = "invalid_intent:invalid_date_range"
 
     def _assert_rejected(self, start: str, end: str) -> None:
         state = _compile(
-            filters={"invoice_timestamp": {"start": start, "end": end}}
+            filters=_date_range_filters(start, end)
         )
         self.assertEqual(state.error, self.REASON)
         self.assertIsNone(state.sql_main)
@@ -1984,21 +2010,20 @@ class CompileSqlEarlyValidationDateRangeTest(unittest.TestCase):
 
     def test_equal_endpoint_range_is_not_rejected_by_the_date_gate(self):
         # start == end is a degenerate but well-ordered range: the reversal
-        # gate must let it through. Date-range SQL construction is a separate,
-        # later task, so a well-ordered range advances past validation and then
-        # hits the compiler's pre-existing unsupported-dict-literal ValueError
-        # in _filter_conditions rather than the invalid_date_range gate. (This
-        # test should be replaced by a compile-success assertion once date-range
-        # SQL construction lands.)
-        with self.assertRaises(ValueError):
-            _compile(
-                filters={
-                    "invoice_timestamp": {
-                        "start": "2010-01-01",
-                        "end": "2010-01-01",
-                    }
-                }
-            )
+        # gate must let it through, and with date-range SQL construction
+        # landing alongside the typed filters, a well-ordered range now
+        # compiles to bounded date-range WHERE conditions instead of raising.
+        state = _compile(
+            filters=_date_range_filters("2010-01-01", "2010-01-01")
+        )
+        self.assertIsNone(state.error)
+        self.assertEqual(
+            state.sql_main,
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
+            "WHERE invoice_timestamp >= '2010-01-01' "
+            "AND invoice_timestamp <= '2010-01-01'",
+        )
+        self.assertEqual(state.sql_companions, {})
 
 
 @unittest.skipUnless(
@@ -2018,13 +2043,13 @@ class CompileSqlEarlyValidationNoMatchingDataTest(unittest.TestCase):
     REASON = "invalid_intent:no_matching_data"
 
     def test_near_miss_country_name_is_rejected_without_suggestion(self):
-        state = _compile(filters={"country": "United Kingdm"})
+        state = _compile(filters=_country_filters("United Kingdm"))
         self.assertEqual(state.error, self.REASON)
         self.assertIsNone(state.sql_main)
         self.assertEqual(state.sql_companions, {})
 
     def test_value_with_no_rows_at_all_is_rejected(self):
-        state = _compile(filters={"country": "Narnia"})
+        state = _compile(filters=_country_filters("Narnia"))
         self.assertEqual(state.error, self.REASON)
         self.assertIsNone(state.sql_main)
         self.assertEqual(state.sql_companions, {})
@@ -2032,7 +2057,7 @@ class CompileSqlEarlyValidationNoMatchingDataTest(unittest.TestCase):
     def test_existing_filter_value_still_compiles(self):
         # Positive control: the proven country-filtered shapes keep compiling;
         # only a value with no matching rows is rejected.
-        state = _compile(filters={"country": "United Kingdom"})
+        state = _compile(filters=_country_filters("United Kingdom"))
         self.assertIsNone(state.error)
         self.assertIsNotNone(state.sql_main)
 
