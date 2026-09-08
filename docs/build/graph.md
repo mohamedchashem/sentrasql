@@ -421,3 +421,16 @@ The first LLM-dependent node in the graph. Uses DeepSeek's function-calling stri
 **Verified end-to-end against the real DeepSeek API** (not just mocked): a query requiring interpretive ambiguity resolution ("revenue in United Kingdom last month") correctly resolved the relative date reference to concrete ISO-8601 boundaries, populated a correctly-structured assumption disclosing that resolution, and extracted the country filter with consistent present/value pairing — all on the first attempt, no retry needed.
 
 114 tests total (107 prior + 7 new offline tests for this node), plus a separate, deliberately-not-in-suite real-API smoke script (`scripts/smoke_extract_query_intent.py`) to keep routine test runs free of API cost.
+
+
+## execute_queries (Node 6) — Complete
+
+Runs `state.sql_main` and every `state.sql_companions` entry against the real database (one read-only connection per invocation, reused across all queries). Gate: `state.error is not None` OR `state.guardrail_status != "passed"` — passthrough, no-op. Main query executes first; companions run only after it succeeds, and — per explicit design decision — still run even when the main query returns zero rows (disclosures describe query behavior, not result size, so "zero exclusions on a zero-row query" remains a meaningful, correctly-computed disclosure).
+
+Main query results accept any well-formed row shape (multiple rows valid, zero rows explicitly valid and non-error). Companion results are strictly validated: exactly one row, one numeric non-negative column — a count of `0` is a normal, valid result; the failure condition is zero rows returned or extra rows/columns, never the count value itself. On any companion failure (execution error or shape violation), remaining companions never execute — verified via a recording-connection wrapper proving genuine non-execution, not inferred from final state alone.
+
+Write-back is atomic: main results and every companion's count/status accumulate in local variables and are only written to `state` after full success. On any failure, `state.main_results` and every `CompanionQuery`'s fields remain exactly as they arrived — including companions that individually succeeded before a later one failed — verified via the same object-identity assertion rigor established in `validate_guardrails`.
+
+**Accepted, explicitly documented tradeoff:** a companion query failure discards the entire answer via the hard-stop policy, even though the main query executed successfully with real results — a real UX cost (a well-formed question can return a generic error because a side verification query broke), accepted as correct per this project's standing "disclosure integrity is non-negotiable, present-but-wrong is worse than absent" principle.
+
+123 tests total across all node/module test files.
