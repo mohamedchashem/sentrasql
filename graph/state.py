@@ -54,7 +54,15 @@ class QueryIntent(BaseModel):
     Attributes:
         aggregation: Aggregate function to apply. Restricted to one of
             "sum", "avg", "count", "min", "max".
-        metric: The business metric being aggregated (e.g. "quantity", "price").
+        metric: The canonical business metric being aggregated. Restricted to
+            exactly one of "revenue", "quantity", "unit_price", or
+            "customer_id" -- these are the canonical metric names every
+            downstream node depends on for exact string matching.
+        distinct: Whether the aggregation should be applied to distinct values
+            only. Defaults to ``False`` (aggregate over every row). For
+            example, ``aggregation="count"`` with ``metric="customer_id"`` and
+            ``distinct=True`` represents "count of unique customers", as
+            opposed to a plain row count.
         group_by: Optional columns to group results by. ``None`` (the default)
             means the query is not grouped.
         filters: Canonical filter constraints to apply, mapping filter/column
@@ -74,7 +82,8 @@ class QueryIntent(BaseModel):
     """
 
     aggregation: Literal["sum", "avg", "count", "min", "max"]
-    metric: str
+    metric: Literal["revenue", "quantity", "unit_price", "customer_id"]
+    distinct: bool = False
     group_by: list[str] | None = None
     filters: dict = Field(default_factory=dict)
     net_gross: Literal["net", "gross_of_cancellations", "returns"] = "net"

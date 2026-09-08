@@ -370,3 +370,17 @@ Four early-validation gates run before any SQL construction: aggregation/metric 
 **Known gap:** date-range filters pass validation but are not yet compiled into SQL (hits a pre-existing unsupported-literal error) — range-based filtering is not yet functional end-to-end.
 
 69 tests total (`tests/test_compile_sql.py`), including live-database verification against independently-computed reference values for every rule and combination.
+
+
+## detect_applicable_rules (Node 3) — Complete
+
+`detect_applicable_rules` is fully deterministic (no LLM) — mechanically checks `state.query_intent`'s fields against four independent trigger conditions, populating `state.applicable_rules`. All four rules can fire in any combination; they are evaluated independently, not as a single dispatch decision.
+
+- **`NET_VS_GROSS`** — fires when `aggregation == "sum"` on `revenue`/`quantity`, OR whenever `net_gross != "net"` (an explicit non-default request), regardless of aggregation/metric. The second condition exists specifically to satisfy `compile_sql`'s `rule_mismatch` gate.
+- **`AVG_EXCLUDE_ZERO_PRICE`** — fires on `avg` over `unit_price` or `revenue` (DESIGN_LOG.md §13: revenue is price-derived, so zero-price rows distort its average the same way). Deliberately does NOT fire on `avg`/`quantity` — a zero-price row still has a real, non-zero quantity.
+- **`CUSTOMER_EXCLUDE_NULL`** — fires when `group_by` includes `customer_id`.
+- **`PRODUCT_EXCLUDE_NONPRODUCT`** — fires when `group_by` includes `stock_code`. Deliberately keys on grouping, not filtering: a query that filters to a specific `stock_code` (via `query_intent.filters`) without grouping by it does not fire this rule, since a single product code is a homogeneous population — the mixed product/non-product ambiguity this rule resolves doesn't arise there.
+
+All four rules verified to compose correctly in every combination via integration tests against the live `compile_sql` node, including a full four-rule-simultaneous case. 102 tests total (`tests/test_detect_applicable_rules.py` + `tests/test_compile_sql.py`), including live-database verification.
+
+**Also fixed in this work cycle (see `graph/state.py`):** `QueryIntent.metric` tightened from `str` to a `Literal` enum (`revenue`/`quantity`/`unit_price`/`customer_id`), and a new `distinct: bool` field was added to represent distinct-count queries (e.g. unique customer count) — both closing gaps found during this node's design review. See DESIGN_LOG.md §13.

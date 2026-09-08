@@ -53,6 +53,7 @@ whose results match independently-run reference queries.
 import unittest
 from pathlib import Path
 
+import pydantic
 from sqlglot import exp, parse
 
 from db.connect import connect_readonly
@@ -1861,36 +1862,52 @@ class CompileSqlNetVsGrossAndZeroPriceLiveDbTest(unittest.TestCase):
 class CompileSqlEarlyValidationAggregationMetricTest(unittest.TestCase):
     """Gate 1: SUM/AVG are only defined for the numeric measure metrics.
 
-    ``compile_sql`` rejects an aggregation that does not logically apply to
-    the metric before it attempts any SQL construction
-    (``invalid_intent:aggregation_metric_mismatch``). Only the canonical
-    numeric measures (``revenue``, ``quantity``, ``unit_price``) may be summed
-    or averaged; text columns cannot, and neither can a numeric identifier
-    such as ``customer_id`` that is stored REAL but is not sensible to
-    average.
+    Rejection now happens in two layers. ``QueryIntent.metric`` is a
+    ``Literal`` restricted to the canonical metric names (``revenue``,
+    ``quantity``, ``unit_price``, ``customer_id``), so a text/dimension column
+    such as ``country`` or ``description`` cannot even be expressed as a
+    metric -- Pydantic raises a ``pydantic.ValidationError`` at construction,
+    before ``compile_sql`` ever runs. Gate 1 in ``compile_sql`` is therefore
+    left with exactly the case the schema cannot express away: SUM/AVG over a
+    canonical metric that is nonetheless not a sensible measure -- a
+    ``customer_id`` that is stored REAL yet is not sensible to sum or average
+    -- rejected as ``invalid_intent:aggregation_metric_mismatch``.
     """
 
     REASON = "invalid_intent:aggregation_metric_mismatch"
 
-    def _assert_rejected(self, aggregation: str, metric: str) -> None:
+    def _assert_rejected_by_compile_sql(self, aggregation: str, metric: str) -> None:
         state = _compile(aggregation=aggregation, metric=metric)
         self.assertEqual(state.error, self.REASON)
         self.assertIsNone(state.sql_main)
         self.assertEqual(state.sql_companions, {})
 
+    def _assert_rejected_by_schema(self, aggregation: str, metric: str) -> None:
+        # The schema -- not compile_sql's Gate 1 -- is the enforcement layer:
+        # a non-canonical metric string fails validation the moment the intent
+        # is built. Assert the single failing field is ``metric``.
+        with self.assertRaises(pydantic.ValidationError) as ctx:
+            QueryIntent(aggregation=aggregation, metric=metric)
+        self.assertEqual(
+            [error["loc"] for error in ctx.exception.errors()], [("metric",)]
+        )
+
     def test_avg_over_text_dimension_metric_is_rejected(self):
-        # AVG over a country name: not numeric, not sensible to average.
-        self._assert_rejected("avg", "country")
+        # AVG over a country name: "country" is not one of the canonical
+        # metric names, so the schema rejects the intent at construction time.
+        self._assert_rejected_by_schema("avg", "country")
 
     def test_sum_over_free_text_metric_is_rejected(self):
-        # SUM over a description: text has no additive meaning.
-        self._assert_rejected("sum", "description")
+        # SUM over a description: "description" is not one of the canonical
+        # metric names, so the schema rejects the intent at construction time.
+        self._assert_rejected_by_schema("sum", "description")
 
     def test_avg_over_numeric_identifier_column_is_rejected(self):
-        # customer_id is stored REAL, but an identifier is not a measure:
-        # averaging it is exactly the "numeric yet not sensible to average"
-        # case the gate exists for.
-        self._assert_rejected("avg", "customer_id")
+        # customer_id is a valid canonical metric (it is in the Literal) and
+        # is stored REAL, but an identifier is not a measure: averaging it is
+        # exactly the "valid enum value yet not sensible to average" case that
+        # is now Gate 1's remaining job.
+        self._assert_rejected_by_compile_sql("avg", "customer_id")
 
     def test_sum_over_amount_metrics_still_compiles(self):
         # Positive control on the measure boundary: SUM(revenue) (the proven
