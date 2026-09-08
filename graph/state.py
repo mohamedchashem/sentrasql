@@ -102,12 +102,17 @@ class CompanionQuery(BaseModel):
         excluded_count: Number of rows the companion query excluded. Trustworthy
             only when ``status`` is "success" -- before the query runs this is
             ``None``, and after a failure it must not be used as a real count.
+        truncated: Whether this companion query's row-limit was
+            enforced/clamped by the guardrail. Same meaning as
+            ``GraphState.main_truncated``, but per companion query. Defaults to
+            ``False``.
     """
 
     rule: RuleName
     sql: str
     status: Literal["pending", "success", "failed"] = "pending"
     excluded_count: int | None = None
+    truncated: bool = False
 
 
 class Disclosure(BaseModel):
@@ -145,6 +150,8 @@ class GraphState(BaseModel):
             Empty by default when no companion queries are needed.
         guardrail_status: Whether the plan passed safety checks. Restricted to
             "pending", "passed", or "failed"; defaults to "pending".
+        main_truncated: Whether the main query's row-limit was
+            enforced/clamped by the guardrail. Defaults to ``False``.
         main_results: Rows returned by the main query as a list of records;
             ``None`` until execution produces them.
         error: Error message if a step failed; ``None`` when all is well.
@@ -162,6 +169,7 @@ class GraphState(BaseModel):
     sql_main: str | None = None
     sql_companions: dict[RuleName, CompanionQuery] = Field(default_factory=dict)
     guardrail_status: Literal["pending", "passed", "failed"] = "pending"
+    main_truncated: bool = False
     main_results: list[dict] | None = None
     error: str | None = None
     disclosures: list[Disclosure] = Field(default_factory=list)

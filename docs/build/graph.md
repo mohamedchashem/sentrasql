@@ -384,3 +384,18 @@ Four early-validation gates run before any SQL construction: aggregation/metric 
 All four rules verified to compose correctly in every combination via integration tests against the live `compile_sql` node, including a full four-rule-simultaneous case. 102 tests total (`tests/test_detect_applicable_rules.py` + `tests/test_compile_sql.py`), including live-database verification.
 
 **Also fixed in this work cycle (see `graph/state.py`):** `QueryIntent.metric` tightened from `str` to a `Literal` enum (`revenue`/`quantity`/`unit_price`/`customer_id`), and a new `distinct: bool` field was added to represent distinct-count queries (e.g. unique customer count) — both closing gaps found during this node's design review. See DESIGN_LOG.md §13.
+
+
+## validate_guardrails (Node 5) — Complete
+
+`validate_guardrails` bridges `compile_sql`'s output to the already-built, independently-tested `db/guardrails.py` module (11 rules) — pure plumbing, no new guardrail logic.
+
+Gate: `state.error is not None` is the no-op passthrough condition (not `state.sql_main is None`) — `error` is the direct, authoritative upstream-failure signal, not coupled to `compile_sql`'s current implementation detail of always nulling `sql_main` on failure (confirmed via code inspection that the two currently coincide, but `error`-based gating is used regardless, since it states the actual intent).
+
+On any validation failure (main query or any companion): sets `state.error`/`state.guardrail_status = "failed"` and stops immediately. Hard invariant, verified via object-identity assertions in tests, not just equality: on failure, `state.sql_companions` is left byte-for-byte identical to what `compile_sql` produced — no partial write-back, even for companions that individually passed validation before a later one failed. Companion loop also verified (via a call-counting mock) to genuinely stop at the first failure, not validate remaining companions wastefully.
+
+On full success: `guardrail_status = "passed"`, `state.sql_main` and every companion's `sql` field are overwritten with their guardrail-enforced (row-limited) versions, and `state.main_truncated` / each `CompanionQuery.truncated` are set from their own independent `validate_sql` result — write-back is deferred until every statement in the batch has passed, so state transitions atomically from all-original to all-enforced, never a partial mix.
+
+107 tests total across `tests/test_compile_sql.py`, `tests/test_detect_applicable_rules.py`, `tests/test_validate_guardrails.py`.
+
+**Schema additions from this work cycle** (see DESIGN_LOG.md §14): `GraphState.main_truncated: bool` and `CompanionQuery.truncated: bool` — closing the open truncation-disclosure composability question from §12. Decision: main-query and companion-query truncation are independent, composable disclosure sources, same pattern as the four policy rules.

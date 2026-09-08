@@ -229,3 +229,10 @@ Add a new, fully detailed entry (not a compressed bullet) every time a genuine d
 **Add distinct-count representation.** The schema had no way to express `COUNT(DISTINCT customer_id)` — "how many unique customers bought X" — as opposed to `COUNT(*)`. This is a genuine missing capability, not just a missing rule trigger; `compile_sql` will also need this once such queries are supported. Added a `distinct: bool` field to `QueryIntent`, defaulting to `False`, so `aggregation="count"` + `metric="customer_id"` + `distinct=True` represents a unique-customer-count query.
 
 **Rule 2 (`AVG_EXCLUDE_ZERO_PRICE`) trigger extended from `unit_price` only to any price-derived metric — `unit_price` or `revenue`.** Revenue is `quantity * unit_price`, so a zero-price row also produces zero revenue for that transaction, distorting a revenue average the same way it distorts a price average. `quantity` is explicitly excluded from this extension — a zero-price row still has a real, non-zero quantity (e.g. a free sample), so quantity averages aren't distorted by zero-price rows and don't need this rule.
+
+
+## 14. Truncation Disclosure Composability (closes open item from §12)
+
+**Decision:** main-query truncation and companion-query truncation are independent disclosure sources, following the same composability pattern already established for the four policy rules (§4, rule 5) — all applicable truncations are disclosed together, not merged into one statement or only the first noticed. Node 6.5 treats "was the main query truncated?" and "was companion query X truncated?" as additional boolean-gated disclosure sources, structurally alongside the four rule-based sources and any assumptions — not a special combined case requiring separate logic.
+
+**Schema homes, decided concretely:** `GraphState.main_truncated: bool` for the main query (a `CompanionQuery` field doesn't fit, since the main query isn't a `CompanionQuery`); `CompanionQuery.truncated: bool` for each companion, alongside its existing `status`/`excluded_count` fields — same kind of per-query metadata, same object.
