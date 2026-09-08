@@ -434,3 +434,16 @@ Write-back is atomic: main results and every companion's count/status accumulate
 **Accepted, explicitly documented tradeoff:** a companion query failure discards the entire answer via the hard-stop policy, even though the main query executed successfully with real results — a real UX cost (a well-formed question can return a generic error because a side verification query broke), accepted as correct per this project's standing "disclosure integrity is non-negotiable, present-but-wrong is worse than absent" principle.
 
 123 tests total across all node/module test files.
+
+
+## assemble_disclosures (Node 6.5) — Complete
+
+Deterministic (no LLM) normalization step converting all five disclosure sources into a unified `list[Disclosure]`, written to `state.disclosures`. Gate: `state.error is not None` OR `guardrail_status != "passed"` OR `main_results is None` — three-condition passthrough, stating the node's full actual precondition rather than the nearest single upstream signal.
+
+**Hard-fail check runs before any disclosure is built:** for each of the three exclusion rules (`AVG_EXCLUDE_ZERO_PRICE`, `CUSTOMER_EXCLUDE_NULL`, `PRODUCT_EXCLUDE_NONPRODUCT`) present in `applicable_rules`, a corresponding `sql_companions` entry with `status == "success"` must exist — otherwise `state.error = "disclosure_assembly_inconsistency:<rule>"` and no disclosures are built at all. This defends against `detect_applicable_rules` and `compile_sql` (populated several steps apart) silently disagreeing — treated as evidence of an upstream bug, never silently worked around, per this project's standing "present-but-wrong is worse than absent" principle applied to the disclosure mechanism itself.
+
+**Five disclosure sources, built in a fixed, deterministic order** (verified via shuffled input ordering in tests, not just fixed-order inputs): rule-based exclusions (including zero-count companions, which still produce a disclosure — the mechanism reports what was checked, not only what was found), the `NET_VS_GROSS` direct-filter statement, assumption-based disclosures, main-query truncation, and per-companion truncation.
+
+**Schema addition from this work cycle** (DESIGN_LOG.md §18): `Disclosure.source` extended to a fourth literal, `"truncation"` — kept distinct from `"rule"` rather than overloaded, so consumers of `state.disclosures` can rely on `source` as a real category signal rather than needing to inspect `label` as an implicit proxy.
+
+130 tests total across all node/module test files.

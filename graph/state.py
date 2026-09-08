@@ -196,15 +196,16 @@ class Disclosure(BaseModel):
     """A statement surfaced to the user about how the answer was produced.
 
     Attributes:
-        source: What generated this disclosure. Restricted to exactly three
+        source: What generated this disclosure. Restricted to exactly four
             values: "rule" (an applicable rule fired), "assumption" (the query
-            required an assumption), or "direct_filter" (the user's filters
-            were applied directly).
+            required an assumption), "direct_filter" (the user's filters were
+            applied directly), or "truncation" (the result set was cut short by
+            row-limit enforcement, distinct from an exclusion-rule disclosure).
         label: Short human-readable headline for the disclosure.
         detail: Longer explanation, e.g. the raw phrase and its resolution.
     """
 
-    source: Literal["rule", "assumption", "direct_filter"]
+    source: Literal["rule", "assumption", "direct_filter", "truncation"]
     label: str
     detail: str
 
