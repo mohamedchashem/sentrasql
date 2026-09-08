@@ -316,3 +316,26 @@ Pydantic v2 generates `anyOf`, not a list-valued `type`, for `Optional[list[str]
 `assemble_disclosures` (Node 6.5) treats a mismatch between `state.applicable_rules` and `state.sql_companions` (a rule present with no corresponding successful companion entry) as a hard failure (`disclosure_assembly_inconsistency:<rule_name>`), not a silently-skipped or fabricated disclosure. Rationale: `applicable_rules` and `sql_companions` are populated by different nodes (`detect_applicable_rules`, `compile_sql`) several steps apart, with nothing in the graph making their agreement structurally guaranteed, only likely given correct upstream behavior — the same category of risk already defended against elsewhere in this project (e.g. `compile_sql`'s own cross-consistency check on `applicable_rules` vs. `query_intent`). Given this project's standing principle that a present-but-wrong disclosure is the worst possible failure mode, this is treated as the most defensively-checked condition in this node.
 
 **Also confirmed:** a companion that succeeds with `excluded_count = 0` still produces a `Disclosure` — the mechanism discloses what was checked, not only what was found excluded. Silently omitting a zero-count disclosure would be a regression from the stated policy.
+
+
+## 20. assemble_answer (Node 7) Requires a Modification to execute_queries's Grouped-Query Output
+
+`assemble_answer`'s design (templating/reference-substitution architecture) requires that grouped query results include a top-level aggregate (`result.total`) alongside the row-level breakdown, so a natural summary sentence is always answerable via a real reference key rather than omitted or fabricated for lack of one. `execute_queries` (Node 6), already implemented and reviewed, currently only produces the row-level grouped breakdown with no separate ungrouped total. This is a required modification to an already-built node, not a new node's design decision — logged explicitly, per the same propagation-tracking discipline used for the `Filters` restructuring's impact on `compile_sql`, so it isn't missed when `execute_queries` is revisited outside the context of this design work. Likely implementation: either a `UNION` combining the grouped and ungrouped aggregate in one query, or a lightweight second query — to be decided at implementation time, not assumed here.
+
+
+## 20. assemble_answer (Node 7) Requires Grouped-Query Total — Built in compile_sql, Validated Like Every Other Query
+
+**Corrects the original version of this entry, which proposed deriving the total inside `execute_queries` by manipulating the already-guardrail-approved `state.sql_main`'s AST at runtime — this was found, during design review, to bypass Node 5's guardrail entirely, since the derived query would never pass through table/column/function whitelisting or row-limit enforcement. That approach was rejected before implementation.**
+
+`assemble_answer`'s templating architecture requires that grouped query results include a top-level aggregate (`result.total`) alongside the row-level breakdown, so a natural summary sentence is always answerable via a real reference key. This total query is built in `compile_sql` (Node 4), alongside the main query and the existing rule-based companion queries, using the same atomic-output, copy-before-second-attachment discipline already established there. It flows through `validate_guardrails` (Node 5) exactly like every other generated query — same checks, no exceptions — preserving the invariant that every query touching the database has been independently validated.
+
+Represented as either a new `sql_companions` entry (keyed by a sentinel not tied to any disclosure rule, since it isn't one — must not be conflated with the four rule-keyed companions when `assemble_disclosures` iterates `sql_companions`) or a dedicated `sql_total` field on `GraphState` — naming decision made at implementation time.
+
+A UNION-based single-query approach was considered and rejected: the guardrail's own statement-type check treats compound set operations as `not_a_select`, so a UNIONed query could never pass Node 5 regardless of how it was constructed.
+
+
+## 21. Deferred: Split graph/nodes.py into Per-Node Files
+
+`graph/nodes.py` has grown into a single file holding all eight node functions plus their individual helper functions — inconsistent with the one-responsibility-per-module pattern already applied throughout `db/` and the Node 2 prompt-content modules. This should be split into one file per node (plus a shared-helpers module for anything genuinely used by more than one node) before this project is considered finished.
+
+**Deliberately deferred, not forgotten:** mid-refactoring a file while a node inside it (`assemble_answer`) is still under active development risks a messy merge against a moving target. This will be done as its own dedicated, isolated task once every node is functionally complete — pure refactor, zero behavior change, verified by the full test suite passing identically before and after.

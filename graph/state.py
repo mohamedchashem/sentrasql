@@ -228,14 +228,30 @@ class GraphState(BaseModel):
             query. Empty by default.
         sql_main: The primary SQL statement answering the query; ``None`` until
             it has been generated.
+        sql_total: The scalar (ungrouped) top-level aggregate SQL for a grouped
+            query: the same base filters and rule exclusions as ``sql_main``
+            with the group-by columns and GROUP BY clause removed. Compiled
+            only when ``query_intent.group_by`` is non-empty; ``None`` for
+            scalar queries, whose single result row already is the top-level
+            aggregate (DESIGN_LOG.md section 20). Held separately from
+            ``sql_companions`` because it serves no disclosure rule: code that
+            iterates ``sql_companions`` looking specifically for the four
+            rule-keyed entries must never see it.
         sql_companions: Companion SQL queries keyed by the rule they serve.
             Empty by default when no companion queries are needed.
         guardrail_status: Whether the plan passed safety checks. Restricted to
             "pending", "passed", or "failed"; defaults to "pending".
         main_truncated: Whether the main query's row-limit was
             enforced/clamped by the guardrail. Defaults to ``False``.
-        main_results: Rows returned by the main query as a list of records;
-            ``None`` until execution produces them.
+        main_results: Rows returned by the main query. A scalar (ungrouped)
+            query stores a list of one record -- or the empty list when no rows
+            matched. A grouped query that produced rows stores a single
+            wrapper dict with two keys: ``"rows"`` (the row-level breakdown:
+            one record per group) and ``"total"`` (the ungrouped top-level
+            aggregate record for the same filters, produced per
+            DESIGN_LOG.md section 20). A grouped query that matched no rows
+            stores the empty list, like a scalar.
+            ``None`` until execution produces the result.
         error: Error message if a step failed; ``None`` when all is well.
         disclosures: Explanations (rule firings, assumptions, direct filters)
             to surface to the user. Empty by default.
@@ -250,10 +266,11 @@ class GraphState(BaseModel):
     intent_extraction_retried: bool = False
     applicable_rules: list[RuleName] = Field(default_factory=list)
     sql_main: str | None = None
+    sql_total: str | None = None
     sql_companions: dict[RuleName, CompanionQuery] = Field(default_factory=dict)
     guardrail_status: Literal["pending", "passed", "failed"] = "pending"
     main_truncated: bool = False
-    main_results: list[dict] | None = None
+    main_results: list[dict] | dict | None = None
     error: str | None = None
     disclosures: list[Disclosure] = Field(default_factory=list)
     final_answer: str | None = None

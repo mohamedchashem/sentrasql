@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.extract_query_intent (Node 2).
+"""Tests for graph.node_extract_query_intent.extract_query_intent (Node 2).
 
 The node wires the independently-built pieces -- ``build_system_prompt``,
 ``get_intent_model`` (strict structured output), and
@@ -37,7 +37,7 @@ from unittest import mock
 
 from langchain_core.messages import SystemMessage
 
-from graph.nodes import extract_query_intent
+from graph.node_extract_query_intent import extract_query_intent
 from graph.state import (
     CountryFilter,
     Filters,
@@ -79,9 +79,9 @@ def _state(
 def _patched_model(fake_model: mock.Mock):
     """Yield patched (build_system_prompt, get_intent_model) around one test."""
     with mock.patch(
-        "graph.nodes.build_system_prompt", return_value=_PROMPT
+        "graph.node_extract_query_intent.build_system_prompt", return_value=_PROMPT
     ) as build_patch, mock.patch(
-        "graph.nodes.get_intent_model", return_value=fake_model
+        "graph.node_extract_query_intent.get_intent_model", return_value=fake_model
     ) as factory_patch:
         yield build_patch, factory_patch
 

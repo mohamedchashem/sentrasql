@@ -1,4 +1,4 @@
-"""Real-API smoke test for ``graph.nodes.extract_query_intent`` (Node 2).
+"""Real-API smoke test for ``graph.node_extract_query_intent.extract_query_intent`` (Node 2).
 
 This is the one clearly-separated live-API test for the fully assembled Node 2
 pipeline -- real DeepSeek call, real system prompt (schema block introspected
@@ -25,7 +25,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from graph.nodes import extract_query_intent  # noqa: E402
+from graph.node_extract_query_intent import extract_query_intent  # noqa: E402
 from graph.state import GraphState  # noqa: E402
 
 

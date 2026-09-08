@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.execute_queries (Node 6).
+"""Tests for graph.node_execute_queries.execute_queries (Node 6).
 
 Implemented contracts so far:
 
@@ -40,6 +40,16 @@ Implemented contracts so far:
    tests -- no ``main_results`` and no companion's ``excluded_count`` or
    ``status`` were written, including for companions that had already
    succeeded.
+
+8. Grouped main queries carry a top-level aggregate (DESIGN_LOG.md section
+   20): when the executed main SQL is a grouped SELECT and returned at least
+   one row, ``state.main_results`` becomes the wrapper ``{"rows": [...],
+   "total": {...}}`` where ``rows`` is the row-level breakdown and ``total``
+   is the ungrouped aggregate record produced by a second lightweight query
+   derived from the main SQL. A grouped query that matched no rows still
+   stores the empty list. Failures of the derived total query set the
+   dedicated reasons ``"query_execution_failed:total"`` /
+   ``"query_result_shape_invalid:total"`` and never write partial results.
 """
 
 import sqlite3
@@ -48,8 +58,8 @@ from pathlib import Path
 from unittest import mock
 
 from db.connect import connect_readonly
-from graph import nodes as nodes_module
-from graph.nodes import execute_queries
+from graph import node_execute_queries as nodes_module
+from graph.node_execute_queries import execute_queries
 from graph.state import CompanionQuery, GraphState, RuleName
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -141,7 +151,9 @@ class ExecuteQueriesMainQueryLiveDbTest(unittest.TestCase):
     def test_successful_multi_row_main_query_populates_main_results(self):
         # A grouped breakdown legitimately returns many rows: one per distinct
         # country in the live database (43, per the loaded dataset). Main
-        # queries get no "exactly one row" rule, unlike companions.
+        # queries get no "exactly one row" rule, unlike companions. Per
+        # DESIGN_LOG.md section 20 the grouped result is the wrapper
+        # {"rows": [...], "total": {...}} once at least one row exists.
         sql = (
             "SELECT country, SUM(quantity * unit_price) AS revenue "
             "FROM transactions GROUP BY country"
@@ -150,18 +162,21 @@ class ExecuteQueriesMainQueryLiveDbTest(unittest.TestCase):
 
         result = execute_queries(state)
 
-        # No error, and main_results is a real list -- not None.
+        # No error, and main_results is the grouped wrapper dict -- not None.
         self.assertIsNone(result.error)
         self.assertIsNotNone(result.main_results)
+        self.assertIsInstance(result.main_results, dict)
+        self.assertEqual(set(result.main_results.keys()), {"rows", "total"})
 
+        rows = result.main_results["rows"]
         reference_rows = _reference_rows(sql)
         self.assertGreater(len(reference_rows), 1)
-        self.assertEqual(len(result.main_results), len(reference_rows))
+        self.assertEqual(len(rows), len(reference_rows))
 
         # Every returned record is a column-name-keyed dict carrying exactly the
         # projected columns, and its values match the independently-run
         # reference query row for row.
-        by_country = {record["country"]: record for record in result.main_results}
+        by_country = {record["country"]: record for record in rows}
         for country, revenue in reference_rows:
             self.assertIn(country, by_country)
             self.assertEqual(by_country[country]["revenue"], revenue)
@@ -169,10 +184,49 @@ class ExecuteQueriesMainQueryLiveDbTest(unittest.TestCase):
                 set(by_country[country].keys()), {"country", "revenue"}
             )
 
+        # The top-level aggregate record mirrors the scalar query for the same
+        # intent (same WHERE, no GROUP BY), independently recomputed here.
+        total = result.main_results["total"]
+        self.assertEqual(set(total.keys()), {"revenue"})
+        expected_total = _reference_rows(
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions"
+        )[0][0]
+        self.assertEqual(total["revenue"], expected_total)
+
+    def test_grouped_total_ignores_row_limit_clause_and_preserves_where(self):
+        # The total must be the aggregate over the whole filtered population,
+        # never the truncated LIMIT window of the grouped breakdown. Here the
+        # grouped SQL is written exactly as validate_guardrails would leave it
+        # for a row-limited query (LIMIT + OFFSET present): the derived total
+        # drops LIMIT/OFFSET but must keep every WHERE condition verbatim.
+        sql = (
+            "SELECT country, SUM(quantity * unit_price) AS revenue "
+            "FROM transactions "
+            "WHERE country IN ('United Kingdom', 'Germany') "
+            "GROUP BY country LIMIT 1 OFFSET 1"
+        )
+        state = _ready_state(sql)
+
+        result = execute_queries(state)
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(result.main_results["rows"]), 1)
+        # Full filtered total, unaffected by LIMIT/OFFSET on the breakdown.
+        expected_total = _reference_rows(
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
+            "WHERE country IN ('United Kingdom', 'Germany')"
+        )[0][0]
+        self.assertEqual(
+            result.main_results["total"]["revenue"], expected_total
+        )
+
     def test_zero_rows_is_a_valid_non_error_outcome(self):
         # A filter that matches nothing still executes successfully. Zero rows
         # is explicitly NOT an error: main_results becomes the empty list
         # (distinct from None = "not executed yet") and no error is set.
+        # A grouped query with no rows keeps the empty list -- with no
+        # breakdown there is no wrapper and no total (a SUM over no rows is
+        # NULL, not a trustworthy aggregate).
         sql = (
             "SELECT country, SUM(quantity * unit_price) AS revenue "
             "FROM transactions WHERE country = 'Atlantis' GROUP BY country"
@@ -201,6 +255,61 @@ class ExecuteQueriesMainQueryLiveDbTest(unittest.TestCase):
         result = execute_queries(state)
 
         self.assertEqual(result.error, _QUERY_EXECUTION_FAILED_MAIN)
+        self.assertIsNone(result.main_results)
+
+
+@unittest.skipUnless(
+    _DB_PATH.exists(), f"real database not present at {_DB_PATH}"
+)
+class ExecuteQueriesGroupedTotalFailureTest(unittest.TestCase):
+    """Node 6 grouped-total failure paths never crash and never write.
+
+    The derived total query (DESIGN_LOG.md section 20) is guaranteed to
+    succeed on a compile_sql-built, guardrail-passed statement, so these paths
+    are exercised by mocking ``_fetch_query``: the main query's fetch returns
+    grouped rows and the total query's fetch fails or returns a non-scalar
+    shape. Each failure must set its dedicated ``:total`` reason -- never the
+    main-query code -- and write nothing back.
+    """
+
+    _GROUPED_SQL = (
+        "SELECT country, SUM(quantity * unit_price) AS revenue "
+        "FROM transactions GROUP BY country"
+    )
+    _GROUPED_ROWS = (["country", "revenue"], [("United Kingdom", 1.0)])
+    _TOTAL_COLUMNS = ["revenue"]
+    _TOTAL_ROW = (123.0,)
+
+    def _run_with_fetch_side_effect(self, side_effects):
+        state = _ready_state(self._GROUPED_SQL)
+        with mock.patch.object(
+            nodes_module, "_fetch_query", side_effect=side_effects
+        ):
+            return execute_queries(state)
+
+    def test_total_database_failure_sets_total_reason_and_writes_nothing(self):
+        result = self._run_with_fetch_side_effect(
+            [
+                self._GROUPED_ROWS,
+                sqlite3.OperationalError("boom"),
+            ]
+        )
+
+        # The main query already succeeded, so the main-query reason code must
+        # not be (mis)used; the dedicated total reason is set instead.
+        self.assertEqual(result.error, "query_execution_failed:total")
+        self.assertIsNone(result.main_results)
+
+    def test_total_shape_invalid_sets_total_reason_and_writes_nothing(self):
+        # A derived total returning two rows fails the single-row shape rule.
+        result = self._run_with_fetch_side_effect(
+            [
+                self._GROUPED_ROWS,
+                (["revenue"], [self._TOTAL_ROW, (456.0,)]),
+            ]
+        )
+
+        self.assertEqual(result.error, "query_result_shape_invalid:total")
         self.assertIsNone(result.main_results)
 
 

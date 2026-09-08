@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.detect_applicable_rules (Node 3).
+"""Tests for graph.node_detect_applicable_rules.detect_applicable_rules (Node 3).
 
 detect_applicable_rules is deterministic and LLM-free: it reads
 ``state.query_intent``, mechanically checks it against the policy rule set, and
@@ -61,7 +61,8 @@ flows through without ever hitting that gate.
 
 import unittest
 
-from graph.nodes import compile_sql, detect_applicable_rules
+from graph.node_compile_sql import compile_sql
+from graph.node_detect_applicable_rules import detect_applicable_rules
 from graph.state import GraphState, QueryIntent, RuleName
 
 _NET_VS_GROSS = RuleName.NET_VS_GROSS

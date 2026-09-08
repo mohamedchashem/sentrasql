@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.compile_sql.
+"""Tests for graph.node_compile_sql.compile_sql.
 
 compile_sql is implemented for the base case and all four policy rules:
 
@@ -43,6 +43,15 @@ the compiler authors a single time, so no test here should need to guard
 against the main and companion conditions drifting apart -- the compiler
 structure prevents it.
 
+compile_sql additionally compiles ``state.sql_total`` for grouped queries
+(``query_intent.group_by`` non-empty): the ungrouped top-level aggregate over
+the exact same base filter and rule-exclusion conditions as the main query,
+held on its own ``GraphState`` field -- never inside ``sql_companions`` -- and
+``None`` for scalar queries. ``CompileSqlGroupedTotalTest`` checks that shape
+structurally (AST-level condition identity between main and total), and
+``CompileSqlGroupedTotalLiveDbTest`` runs the total through the live guardrail
+and database like every other compiled statement.
+
 The live-database tests run every compiled query through the SQL guardrail
 (``db.guardrails.validate_sql``) exactly as the graph's validate_guardrails /
 execute_queries nodes will, then execute the guardrail-approved SQL against the
@@ -58,7 +67,7 @@ from sqlglot import exp, parse
 
 from db.connect import connect_readonly
 from db.guardrails import validate_sql
-from graph.nodes import compile_sql
+from graph.node_compile_sql import compile_sql
 from graph.state import (
     CountryFilter,
     DateRangeFilter,
@@ -1084,6 +1093,155 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         )
 
 
+class CompileSqlGroupedTotalTest(unittest.TestCase):
+    """compile_sql's grouped-query total (``state.sql_total``).
+
+    Every grouped query (``query_intent.group_by`` non-empty) compiles an extra
+    scalar statement -- ``state.sql_total`` -- alongside ``sql_main`` and any
+    rule companions: the ungrouped top-level aggregate over the *same* base
+    filter conditions and rule-exclusion conditions as the main query, with the
+    group-by columns and the GROUP BY clause removed. The total is stored on
+    its own ``GraphState`` field, never inside ``sql_companions`` (whose keys
+    stay exactly the fired rules -- the total serves no disclosure rule, so
+    code iterating ``sql_companions`` for rule-based entries must never see
+    it). Scalar queries leave ``state.sql_total`` ``None``: their single result
+    row already *is* the top-level aggregate.
+    """
+
+    def test_grouped_revenue_compiles_scalar_total_with_no_group_by(self):
+        state = _compile(group_by=["country"])
+        self.assertEqual(
+            state.sql_main,
+            "SELECT country, SUM(quantity * unit_price) AS revenue "
+            "FROM transactions GROUP BY country",
+        )
+        self.assertEqual(
+            state.sql_total,
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions",
+        )
+        self.assertEqual(state.sql_companions, {})
+
+        # AST-level: the main query carries exactly one Group; the total
+        # carries none and projects only the aggregate -- never a group column.
+        main_ast = parse(state.sql_main, read="sqlite")[0]
+        total_ast = parse(state.sql_total, read="sqlite")[0]
+        self.assertIsNotNone(main_ast.find(exp.Group))
+        self.assertIsNone(total_ast.find(exp.Group))
+        self.assertEqual(len(main_ast.expressions), 2)
+        self.assertEqual(len(total_ast.expressions), 1)
+        self.assertEqual(total_ast.expressions[0].alias, "revenue")
+
+    def test_scalar_query_compiles_no_total(self):
+        state = _compile()
+        self.assertIsNone(state.sql_total)
+        # Even a scalar query that fires an exclusion rule needs no total: its
+        # single result row already is the top-level aggregate.
+        state = _compile(
+            aggregation="avg",
+            metric="unit_price",
+            filters=_country_filters("United Kingdom"),
+            rules=[RuleName.AVG_EXCLUDE_ZERO_PRICE],
+        )
+        self.assertIsNone(state.error)
+        self.assertIsNone(state.sql_total)
+
+    def test_grouped_total_shares_identical_filter_and_exclusion_conditions(self):
+        # Rules 2 and 3 each AND their negation onto the main query; the total
+        # must carry exactly those same conditions -- the base country filter
+        # plus both negations -- nothing more, nothing less.
+        state = _compile(
+            aggregation="avg",
+            metric="unit_price",
+            group_by=["country", "customer_id"],
+            filters=_country_filters("United Kingdom"),
+            rules=[
+                RuleName.AVG_EXCLUDE_ZERO_PRICE,
+                RuleName.CUSTOMER_EXCLUDE_NULL,
+            ],
+        )
+        self.assertEqual(
+            state.sql_main,
+            "SELECT country, customer_id, AVG(unit_price) AS unit_price "
+            "FROM transactions WHERE country = 'United Kingdom' "
+            "AND unit_price <> 0 AND customer_id IS NOT NULL "
+            "GROUP BY country, customer_id",
+        )
+        self.assertEqual(
+            state.sql_total,
+            "SELECT AVG(unit_price) AS unit_price FROM transactions "
+            "WHERE country = 'United Kingdom' AND unit_price <> 0 "
+            "AND customer_id IS NOT NULL",
+        )
+
+        # AST-level identical filter/exclusion conditions: both WHERE trees
+        # render to the same AND condition, and flattening each yields the same
+        # set of condition leaves.
+        main_where = parse(state.sql_main, read="sqlite")[0].find(exp.Where)
+        total_where = parse(state.sql_total, read="sqlite")[0].find(exp.Where)
+        self.assertEqual(
+            total_where.sql(dialect="sqlite"),
+            main_where.sql(dialect="sqlite"),
+        )
+        self.assertEqual(
+            {
+                leaf.sql(dialect="sqlite")
+                for leaf in total_where.this.flatten()
+            },
+            {
+                leaf.sql(dialect="sqlite")
+                for leaf in main_where.this.flatten()
+            },
+        )
+
+        # The total's single projection is the very same aggregate expression
+        # the main query's SELECT carries (AVG over unit_price aliased to the
+        # metric), compared at the AST level, not by string.
+        main_ast = parse(state.sql_main, read="sqlite")[0]
+        total_ast = parse(state.sql_total, read="sqlite")[0]
+        main_metric_projection = next(
+            proj for proj in main_ast.expressions if proj.alias == "unit_price"
+        )
+        total_projection = total_ast.expressions[0]
+        self.assertEqual(
+            total_projection.this.sql(dialect="sqlite"),
+            main_metric_projection.this.sql(dialect="sqlite"),
+        )
+        self.assertEqual(total_projection.alias, "unit_price")
+        self.assertIsNotNone(main_ast.find(exp.Group))
+        self.assertIsNone(total_ast.find(exp.Group))
+
+        # The total lives on its own GraphState field: sql_companions keys are
+        # exactly the two fired rules -- no extra entry for the total.
+        self.assertEqual(
+            set(state.sql_companions),
+            {
+                RuleName.AVG_EXCLUDE_ZERO_PRICE,
+                RuleName.CUSTOMER_EXCLUDE_NULL,
+            },
+        )
+
+    def test_grouped_net_vs_gross_variant_condition_is_shared_into_total(self):
+        # NET_VS_GROSS contributes a WHERE condition to the main query (the
+        # gross-of-cancellations variant); the total must share that same
+        # condition, because the total is the same population ungrouped.
+        state = _compile(
+            group_by=["country"],
+            net_gross="gross_of_cancellations",
+            rules=[RuleName.NET_VS_GROSS],
+        )
+        self.assertEqual(
+            state.sql_main,
+            "SELECT country, SUM(quantity * unit_price) AS revenue "
+            "FROM transactions WHERE invoice_id NOT LIKE 'C%' "
+            "GROUP BY country",
+        )
+        self.assertEqual(
+            state.sql_total,
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
+            "WHERE invoice_id NOT LIKE 'C%'",
+        )
+
+
 @unittest.skipUnless(
     _DB_PATH.exists(), f"real database not present at {_DB_PATH}"
 )
@@ -2104,6 +2262,77 @@ class CompileSqlEarlyValidationRuleMismatchTest(unittest.TestCase):
         state = _compile(net_gross="net")
         self.assertIsNone(state.error)
         self.assertIsNotNone(state.sql_main)
+
+
+@unittest.skipUnless(
+    _DB_PATH.exists(), f"real database not present at {_DB_PATH}"
+)
+class CompileSqlGroupedTotalLiveDbTest(unittest.TestCase):
+    """Run a compiled grouped query plus its total through the guardrail on the real DB.
+
+    Mirrors the production path (compile_sql -> validate_guardrails): every
+    compiled statement -- sql_main, the grouped-query total, and each companion
+    -- is approved by ``db.guardrails.validate_sql`` against the live schema,
+    and the guardrail-approved total is executed on the read-only connection.
+    The expected value is computed by an independent reference query, never
+    assumed from the compiled SQL. The grouped context is realistic: average
+    unit price grouped by stock code is exactly the shape that fires rules 2
+    (average over unit_price) and 4 (grouping by the product dimension).
+    """
+
+    RULES = [
+        RuleName.AVG_EXCLUDE_ZERO_PRICE,
+        RuleName.PRODUCT_EXCLUDE_NONPRODUCT,
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = connect_readonly(_DB_PATH)
+        cls.schema = _read_schema()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+
+    def test_grouped_total_passes_guardrail_and_matches_reference(self):
+        state = _compile(
+            aggregation="avg",
+            metric="unit_price",
+            group_by=["stock_code"],
+            rules=list(self.RULES),
+        )
+        self.assertIsNone(state.error)
+        self.assertIsNotNone(state.sql_total)
+        # The total is the scalar version of the main query: same exclusions,
+        # no GROUP BY clause.
+        self.assertNotIn("GROUP BY", state.sql_total)
+
+        # Every statement must pass the same guardrail validate_guardrails runs.
+        statements = [
+            ("main query", state.sql_main),
+            ("total query", state.sql_total),
+        ]
+        statements += [
+            (f"{rule.value} companion", state.sql_companions[rule].sql)
+            for rule in self.RULES
+        ]
+        enforced: list[str] = []
+        for label, sql in statements:
+            passed, reason, enforced_sql, _ = validate_sql(sql, self.schema)
+            self.assertTrue(passed, f"guardrail rejected {label}: {reason}")
+            enforced.append(enforced_sql)
+
+        # The grouped main query returns one row per stock code still in scope,
+        # and the guardrail-approved total equals an independent reference query
+        # over the identical filter + exclusion conditions.
+        main_rows = self.conn.execute(enforced[0]).fetchall()
+        self.assertGreater(len(main_rows), 1)
+        total = self.conn.execute(enforced[1]).fetchone()[0]
+        expected_total = self.conn.execute(
+            "SELECT AVG(unit_price) FROM transactions "
+            "WHERE unit_price != 0 AND line_item_type = 'product'"
+        ).fetchone()[0]
+        self.assertAlmostEqual(total, expected_total, places=6)
 
 
 if __name__ == "__main__":

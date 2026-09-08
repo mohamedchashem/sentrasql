@@ -447,3 +447,12 @@ Deterministic (no LLM) normalization step converting all five disclosure sources
 **Schema addition from this work cycle** (DESIGN_LOG.md §18): `Disclosure.source` extended to a fourth literal, `"truncation"` — kept distinct from `"rule"` rather than overloaded, so consumers of `state.disclosures` can rely on `source` as a real category signal rather than needing to inspect `label` as an implicit proxy.
 
 130 tests total across all node/module test files.
+
+
+## Refactor: graph/nodes.py Split into Per-Node Modules
+
+`graph/nodes.py` (grown to 1,669 lines holding all eight nodes) was split into one file per node, per DESIGN_LOG.md §21: `node_extract_query_intent.py`, `node_detect_applicable_rules.py`, `node_compile_sql.py`, `node_validate_guardrails.py`, `node_execute_queries.py`, `node_assemble_disclosures.py`, `node_assemble_answer.py`, `node_handle_error.py`, plus `node_shared.py` for the one genuinely cross-node dependency (`_MAIN_DB_PATH`, used by `compile_sql`, `validate_guardrails`, and `execute_queries`).
+
+Pure refactor, zero behavior change: source code was moved via exact byte-verified slicing, not rewritten. Verified via the full test suite's sorted test-name set (not just pass count) being identical at multiple checkpoints across the migration — before any change, after moving code but before deleting the old file, and after final cleanup. All four checkpoints: 180/180 passing, identical test names, zero skipped/added/removed.
+
+`graph/nodes.py` was fully deleted, no re-export shim. All imports updated across `graph/build.py`, `scripts/smoke_extract_query_intent.py`, and every test file — including non-obvious mock-patch target strings in `test_execute_queries.py` and `test_validate_guardrails.py`, which reference module paths directly and would have silently patched a deleted module if left unupdated.

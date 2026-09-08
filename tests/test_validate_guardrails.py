@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.validate_guardrails (Node 5).
+"""Tests for graph.node_validate_guardrails.validate_guardrails (Node 5).
 
 Implemented contracts so far:
 
@@ -31,6 +31,15 @@ Implemented contracts so far:
    receive no enforced-SQL or truncation write-back. When every companion
    passes, this stage must not set an error.
 
+   The grouped-query total (``state.sql_total``) is validated under this same
+   contract: compile_sql stores it on its own GraphState field -- never inside
+   ``sql_companions`` -- so the companion loop above does not see it
+   automatically. ``validate_guardrails`` validates it explicitly, right after
+   the main query and before the companions, and on the success path stores its
+   enforced (row-limited) SQL back onto ``state.sql_total``. Its truncation
+   flag is deliberately not stored: a scalar single-row aggregate can never
+   actually be cut by row-limit enforcement.
+
 4. Success path, no companions. When the main query passes and
    ``state.sql_companions`` is empty, the node stores ``validate_sql``'s
    enforced (row-limited) SQL back into ``state.sql_main``, propagates that
@@ -52,8 +61,9 @@ Implemented contracts so far:
 import unittest
 from unittest import mock
 
-from graph import nodes as nodes_module
-from graph.nodes import validate_guardrails
+from graph import node_validate_guardrails as nodes_module
+from graph.node_compile_sql import compile_sql
+from graph.node_validate_guardrails import validate_guardrails
 from graph.state import (
     CompanionQuery,
     CountryFilter,
@@ -394,7 +404,8 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
             RuleName.PRODUCT_EXCLUDE_NONPRODUCT
         ]
 
-        # Wrap graph.nodes.validate_sql with a counting delegate so the
+        # Wrap graph.node_validate_guardrails.validate_sql with a counting
+        # delegate so the
         # early-stop contract is observable: after the main query and the valid
         # companion pass, the failing companion must end the run -- the later
         # companion's SQL must never be handed to validate_sql.
@@ -448,6 +459,155 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
         self.assertEqual(result.sql_main, state.sql_main)
         self.assertEqual(result.main_truncated, False)
         # The failure path may change exactly two fields and nothing else.
+        expected = state.model_dump()
+        expected["error"] = "disallowed_table:secret_orders"
+        expected["guardrail_status"] = "failed"
+        self.assertEqual(result.model_dump(), expected)
+
+
+class ValidateGuardrailsGroupedTotalTest(unittest.TestCase):
+    """Node 5 grouped-total (``state.sql_total``) validation coverage.
+
+    compile_sql stores the grouped-query total on its own GraphState field --
+    not as a ``sql_companions`` entry -- so the existing companion-validation
+    loop (which iterates ``state.sql_companions.values()``) does not see it
+    automatically. ``validate_guardrails`` must therefore validate
+    ``state.sql_total`` explicitly, through the very same
+    ``db.guardrails.validate_sql`` gate as ``sql_main`` and the companions,
+    before any companion is validated. These tests prove that coverage against
+    the live schema the node fetches itself: a valid grouped total passes and
+    is enforced exactly like the main query; a failing total rejects the whole
+    plan (hard stop, nothing written back, companions never reached); and a
+    scalar query with no total skips the stage entirely.
+    """
+
+    def test_grouped_query_total_is_validated_and_enforced_alongside_main(self):
+        # Real compile_sql output for a grouped query: sql_main grouped, plus
+        # sql_total -- the scalar ungrouped aggregate over the same conditions.
+        state = compile_sql(
+            GraphState(
+                raw_query="What is total revenue by country?",
+                normalized_query="total revenue by country",
+                query_intent=QueryIntent(
+                    aggregation="sum",
+                    metric="revenue",
+                    group_by=["country"],
+                ),
+                applicable_rules=[],
+                guardrail_status="pending",
+                error=None,
+            )
+        )
+        self.assertIsNone(state.error)
+        self.assertIsNotNone(state.sql_total)
+        self.assertEqual(state.sql_companions, {})
+        # The node mutates state in place, so capture the pre-validation
+        # statements before calling it.
+        original_total_sql = state.sql_total
+        original_main_sql = state.sql_main
+
+        result = validate_guardrails(state)
+
+        # The whole plan -- main AND total -- passed the guardrail, and the
+        # total went through the same row-limit enforcement as every statement:
+        # it has no LIMIT of its own, so the ceiling is injected just like
+        # sql_main's. The total is stored back onto state.sql_total (its own
+        # field), never into sql_companions.
+        self.assertIsNone(result.error)
+        self.assertEqual(result.guardrail_status, "passed")
+        self.assertEqual(result.sql_total, original_total_sql + " LIMIT 500")
+        self.assertEqual(result.sql_main, original_main_sql + " LIMIT 500")
+        self.assertTrue(result.main_truncated)
+        self.assertEqual(result.sql_companions, {})
+
+    def test_scalar_query_with_no_total_passes_and_keeps_sql_total_none(self):
+        state = compile_sql(
+            GraphState(
+                raw_query="What is total revenue?",
+                normalized_query="total revenue",
+                query_intent=QueryIntent(
+                    aggregation="sum",
+                    metric="revenue",
+                ),
+                applicable_rules=[],
+                guardrail_status="pending",
+                error=None,
+            )
+        )
+        self.assertIsNone(state.sql_total)
+
+        result = validate_guardrails(state)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.guardrail_status, "passed")
+        self.assertIsNone(result.sql_total)
+
+    def test_failing_total_rejects_plan_before_companions_and_writes_nothing(
+        self,
+    ):
+        # A grouped main query whose total statement fails validation (a
+        # disallowed table) must fail the node with the guardrail's exact
+        # reason. The total is validated before any companion, and nothing is
+        # written back on the failure path.
+        main_sql = (
+            "SELECT country, AVG(unit_price) AS unit_price FROM transactions "
+            "WHERE unit_price != 0 GROUP BY country"
+        )
+        failing_total_sql = (
+            "SELECT AVG(unit_price) AS unit_price FROM secret_orders "
+            "WHERE unit_price != 0"
+        )
+        companion = CompanionQuery(
+            rule=RuleName.CUSTOMER_EXCLUDE_NULL,
+            sql=(
+                "SELECT COUNT(*) AS excluded_count FROM transactions "
+                "WHERE customer_id IS NULL"
+            ),
+        )
+        state = GraphState(
+            raw_query="What is average unit price by country?",
+            normalized_query="average unit price by country",
+            query_intent=QueryIntent(
+                aggregation="avg",
+                metric="unit_price",
+                group_by=["country"],
+            ),
+            sql_main=main_sql,
+            sql_total=failing_total_sql,
+            sql_companions={RuleName.CUSTOMER_EXCLUDE_NULL: companion},
+            guardrail_status="pending",
+            error=None,
+        )
+        stored_companions = state.sql_companions
+
+        # A recording delegate proves the total is the second statement
+        # validated (right after the main query) and that the companion after
+        # it is never reached.
+        real_validate_sql = nodes_module.validate_sql
+        validated_sqls: list[str] = []
+
+        def counting_validate_sql(sql, schema, *args, **kwargs):
+            validated_sqls.append(sql)
+            return real_validate_sql(sql, schema, *args, **kwargs)
+
+        with mock.patch.object(
+            nodes_module,
+            "validate_sql",
+            side_effect=counting_validate_sql,
+        ):
+            result = validate_guardrails(state)
+
+        self.assertEqual(result.error, "disallowed_table:secret_orders")
+        self.assertEqual(result.guardrail_status, "failed")
+        self.assertEqual(validated_sqls, [main_sql, failing_total_sql])
+        self.assertNotIn(companion.sql, validated_sqls)
+
+        # No write-back on the failure path: sql_main and sql_total stay
+        # exactly as received, and sql_companions is the very same mapping with
+        # the very same entry objects.
+        self.assertEqual(result.sql_main, main_sql)
+        self.assertEqual(result.sql_total, failing_total_sql)
+        self.assertIs(result.sql_companions, stored_companions)
+        self.assertEqual(result.sql_companions, state.sql_companions)
         expected = state.model_dump()
         expected["error"] = "disallowed_table:secret_orders"
         expected["guardrail_status"] = "failed"

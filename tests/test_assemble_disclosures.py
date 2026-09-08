@@ -1,4 +1,4 @@
-"""Tests for graph.nodes.assemble_disclosures (Node 6.5).
+"""Tests for graph.node_assemble_disclosures.assemble_disclosures (Node 6.5).
 
 Implemented contracts:
 
@@ -30,7 +30,7 @@ Implemented contracts:
 
 import unittest
 
-from graph.nodes import assemble_disclosures
+from graph.node_assemble_disclosures import assemble_disclosures
 from graph.state import (
     Assumption,
     CompanionQuery,
