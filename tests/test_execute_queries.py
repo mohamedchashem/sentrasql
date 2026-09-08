@@ -16,7 +16,10 @@ Implemented contracts so far:
 
 3. Zero rows is a valid, non-failure outcome. A main query matching no rows
    stores an empty list (distinct from ``None`` = "not executed yet") and sets
-   no error.
+   no error. A scalar SUM/AVG over an empty window lands in the same state:
+   SQLite returns a single NULL-aggregate row for such a query, and the node
+   normalizes it to that same empty list rather than a misleading NULL-valued
+   record.
 
 4. A database-level failure never crashes the graph: any ``sqlite3.Error``
    raised while connecting or executing is translated into the exact reason
@@ -49,7 +52,11 @@ Implemented contracts so far:
    derived from the main SQL. A grouped query that matched no rows still
    stores the empty list. Failures of the derived total query set the
    dedicated reasons ``"query_execution_failed:total"`` /
-   ``"query_result_shape_invalid:total"`` and never write partial results.
+   ``"query_result_shape_invalid:total"`` and never write partial results. A
+   derived total whose single aggregate value is NULL while rows exist in the
+   breakdown is an internal inconsistency (the total shares the breakdown's
+   filters and aggregate) and fails with the same
+   ``"query_result_shape_invalid:total"`` reason -- never a silent empty list.
 """
 
 import sqlite3
@@ -239,6 +246,34 @@ class ExecuteQueriesMainQueryLiveDbTest(unittest.TestCase):
         self.assertEqual(_reference_rows(sql), [])
         self.assertEqual(result.main_results, [])
 
+    def test_scalar_sum_and_avg_over_zero_row_window_normalize_to_empty_list(self):
+        # SQLite's scalar aggregates return exactly one row even over an empty
+        # window; for SUM/AVG that row carries a NULL aggregate value. The node
+        # must normalize that single-NULL-aggregate row to the documented
+        # "no rows matched" empty list -- no error, and no misleading
+        # NULL-valued record that downstream reference-building would treat as
+        # a real value. Each SQL is first proven to return [(None,)] on the
+        # real database so this is genuinely exercising the NULL path.
+        sqls = [
+            (
+                "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
+                "WHERE country = 'Atlantis'"
+            ),
+            (
+                "SELECT AVG(unit_price) AS unit_price FROM transactions "
+                "WHERE country = 'Atlantis'"
+            ),
+        ]
+        for sql in sqls:
+            with self.subTest(sql=sql):
+                self.assertEqual(_reference_rows(sql), [(None,)])
+                state = _ready_state(sql)
+
+                result = execute_queries(state)
+
+                self.assertIsNone(result.error)
+                self.assertEqual(result.main_results, [])
+
     def test_database_level_failure_sets_exact_reason_and_does_not_raise(self):
         # First prove this SQL genuinely fails at the database level, so the
         # test is exercising the real exception path and not a silent no-op.
@@ -306,6 +341,22 @@ class ExecuteQueriesGroupedTotalFailureTest(unittest.TestCase):
             [
                 self._GROUPED_ROWS,
                 (["revenue"], [self._TOTAL_ROW, (456.0,)]),
+            ]
+        )
+
+        self.assertEqual(result.error, "query_result_shape_invalid:total")
+        self.assertIsNone(result.main_results)
+
+    def test_total_null_value_while_rows_exist_sets_inconsistency_reason(self):
+        # Rows in the breakdown imply a non-NULL total, because the derived
+        # total shares the breakdown's filters and aggregate. A NULL total
+        # value is therefore an internal inconsistency (defensive against an
+        # upstream compile/guardrail bug) and must fail with the total shape
+        # reason -- never a silent [] and never a crash.
+        result = self._run_with_fetch_side_effect(
+            [
+                self._GROUPED_ROWS,
+                (["revenue"], [(None,)]),
             ]
         )
 

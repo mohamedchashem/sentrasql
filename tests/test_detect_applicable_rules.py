@@ -442,7 +442,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertIsNone(state.error)
         self.assertEqual(
             state.sql_main,
-            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions",
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -475,7 +475,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE quantity < 0 AND unit_price <> 0",
+            "WHERE quantity < 0 AND unit_price <> 0 LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions), {_AVG_EXCLUDE_ZERO_PRICE}
@@ -483,7 +483,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[_AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
 
     def test_avg_over_revenue_flows_through_detection_to_compile_sql(self):
@@ -498,7 +498,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE unit_price <> 0",
+            "WHERE unit_price <> 0 LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions), {_AVG_EXCLUDE_ZERO_PRICE}
@@ -506,7 +506,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[_AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
 
     def test_non_firing_intent_still_compiles_as_base_case(self):
@@ -522,7 +522,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertIsNone(state.error)
         self.assertEqual(
             state.sql_main,
-            "SELECT AVG(quantity) AS quantity FROM transactions",
+            "SELECT AVG(quantity) AS quantity FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -556,7 +556,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[_CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
 
     def test_stock_code_grouped_query_flows_through_detection_to_compile_sql(
@@ -587,7 +587,7 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[_PRODUCT_EXCLUDE_NONPRODUCT].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE line_item_type <> 'product'",
+            "WHERE line_item_type <> 'product' LIMIT 1",
         )
 
     def test_all_four_rules_flow_through_detection_to_compile_sql(self):
@@ -632,17 +632,17 @@ class DetectApplicableRulesCompileSqlIntegrationTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[_AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[_CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[_PRODUCT_EXCLUDE_NONPRODUCT].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE line_item_type <> 'product'",
+            "WHERE line_item_type <> 'product' LIMIT 1",
         )
 
 

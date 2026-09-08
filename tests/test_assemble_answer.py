@@ -16,6 +16,10 @@ Implemented contracts covered below:
    ``graph.answer_prompt.build_answer_prompt``; the produced prompt lists
    every key/value that actually exists for that specific call (asserted
    against the real keys and formatted values, not a fixed expected string).
+   An exception in either setup step is caught and converted into the terminal
+   ``answer_generation_failed:setup_error:<ExceptionClass>`` error with no
+   retry -- never a crash, and never a wasted retry of an LLM call that
+   cannot fix a deterministic setup failure.
 
 3. LLM generation, validation, rendering, and retry. ``get_answer_model`` is
    mocked in every test here (no real API cost). The node invokes the model
@@ -295,7 +299,8 @@ class AssembleAnswerGatePassthroughTest(unittest.TestCase):
 
 
 class AssembleAnswerSetupTest(unittest.TestCase):
-    """Node 7 setup: a gate-passing state reaches the prompt-building step."""
+    """Node 7 setup: a gate-passing state reaches prompt building, and any
+    exception in the deterministic setup becomes a terminal setup error."""
 
     def test_reaches_prompt_building_with_the_states_own_reference_keys(self):
         state = _answer_state()
@@ -353,6 +358,50 @@ class AssembleAnswerSetupTest(unittest.TestCase):
         self.assertIn(
             "a text segment's content must not contain any digit", prompt
         )
+
+    def test_reference_dictionary_exception_becomes_terminal_setup_error(self):
+        state = _answer_state()
+
+        with mock.patch(
+            "graph.node_assemble_answer.build_reference_dict",
+            side_effect=RuntimeError("unexpected result shape"),
+        ), mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        # The exception is caught (it does not propagate) and converted into
+        # the exact terminal reason. No retry flag, no final answer, and the
+        # LLM factory was never reached -- a deterministic setup failure is
+        # not something a retried model call could fix.
+        self.assertEqual(
+            result.error, "answer_generation_failed:setup_error:RuntimeError"
+        )
+        self.assertFalse(result.answer_generation_retried)
+        self.assertIsNone(result.final_answer)
+        self.assertEqual(result.error_reasons, [])
+        model_factory.assert_not_called()
+
+    def test_prompt_building_exception_becomes_terminal_setup_error(self):
+        state = _answer_state()
+
+        # The reference dictionary genuinely builds first (real builder); the
+        # failure fires in the second deterministic setup step.
+        with mock.patch(
+            "graph.node_assemble_answer.build_answer_prompt",
+            side_effect=ValueError("prompt build exploded"),
+        ), mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(
+            result.error, "answer_generation_failed:setup_error:ValueError"
+        )
+        self.assertFalse(result.answer_generation_retried)
+        self.assertIsNone(result.final_answer)
+        self.assertEqual(result.error_reasons, [])
+        model_factory.assert_not_called()
 
 
 class AnswerPromptContentTest(unittest.TestCase):

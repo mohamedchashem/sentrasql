@@ -342,8 +342,10 @@ def _scalar_aggregate_select(
     query's *identical* WHERE conditions, with no group-by columns and no GROUP
     BY clause. ``conditions`` must already be deep copies -- never the objects
     attached to the main query's tree, exactly like the companion queries'
-    copied conditions. ``compile_sql`` never emits LIMIT/OFFSET/ORDER BY on
-    either query, so there is nothing further to strip.
+    copied conditions. Because the total is built fresh from
+    ``_metric_aggregate`` and the copied conditions -- never by transforming
+    the main query's AST -- it carries none of the main query's clauses (in
+    particular no ORDER BY or OFFSET) over to strip.
     """
     query = exp.select(_metric_aggregate(intent)).from_(_MAIN_TABLE)
     if conditions:
@@ -390,17 +392,28 @@ def _parse_filter_datetime(value: object) -> datetime:
 
 
 def _aggregation_metric_mismatch_error(intent: QueryIntent) -> str | None:
-    """Return the aggregation/metric-mismatch reason when SUM/AVG targets a non-measure.
+    """Return the aggregation/metric-mismatch reason for a non-sensible combination.
 
-    Only the numeric measure metrics (``revenue``, ``quantity``,
-    ``unit_price``) can be summed or averaged; averaging e.g. a country or a
-    ``customer_id`` -- the latter a REAL column that is still not sensible to
-    average -- is rejected (``invalid_intent:aggregation_metric_mismatch``).
-    COUNT/MIN/MAX are left alone: they are defined for any metric the compiler
-    knows. A metric the compiler does not know at all is deliberately not
-    judged here (it still fails loudly later in ``_metric_expression``), so
-    this gate only reports on real metrics.
+    Two rules share the one ``invalid_intent:aggregation_metric_mismatch``
+    reason, mirroring the same rationale for ``customer_id``:
+
+    * SUM/AVG are only defined over the numeric measure metrics (``revenue``,
+      ``quantity``, ``unit_price``). Summing or averaging e.g. a ``country`` or
+      a ``customer_id`` -- the latter a REAL column that is still an opaque
+      identifier, not a measure -- is rejected.
+    * MIN/MAX over ``customer_id`` are rejected for the same reason: the lowest
+      or highest identifier value is not a sensible business aggregation even
+      though the column is real and numeric. COUNT and COUNT(DISTINCT
+      ``customer_id``) remain allowed -- counting customer rows, or unique
+      customers, is meaningful.
+
+    Other COUNT/MIN/MAX combinations are left alone: they are defined for any
+    metric the compiler knows. A metric the compiler does not know at all is
+    deliberately not judged here (it still fails loudly later in
+    ``_metric_expression``), so this gate only reports on real metrics.
     """
+    if intent.aggregation in ("min", "max") and intent.metric == "customer_id":
+        return _AGGREGATION_METRIC_MISMATCH_REASON
     if intent.aggregation not in ("sum", "avg"):
         return None
     if intent.metric not in _KNOWN_METRICS:
@@ -603,12 +616,26 @@ def compile_sql(state: GraphState) -> GraphState:
       deep-copied, never referenced, before its second attachment to the new
       tree, exactly like the companion queries), projecting only the same
       aggregate expression the main query's SELECT carries, with the group-by
-      columns and the GROUP BY clause dropped (compile_sql never emits
-      LIMIT/OFFSET/ORDER BY, so there is nothing further to strip).
+      columns and the GROUP BY clause dropped (compile_sql emits no OFFSET or
+      ORDER BY, and every single-row statement -- see the row-limit note
+      below -- is compiled with an explicit LIMIT 1).
       ``sql_companions`` is untouched by the total: it serves no disclosure
       rule, so those keys stay exactly the fired rules. Scalar queries set
       ``state.sql_total`` to ``None`` -- their single result row already *is*
       the top-level aggregate.
+
+    Every compiled statement whose shape is structurally guaranteed to return
+    exactly one row is capped at compile time with an explicit ``LIMIT 1``:
+    the scalar (ungrouped) ``sql_main``, the grouped-query ``sql_total``, and
+    every companion ``COUNT(*)`` in ``sql_companions``. These queries can
+    never produce more than one row, so the downstream guardrail's row-limit
+    enforcement (which injects ``LIMIT {tier}`` into any statement with no
+    limit) must not treat them as unbounded: with ``LIMIT 1`` already present
+    and at or below the guardrail's ceiling, the guardrail leaves them
+    unchanged and their ``truncated`` flag correctly evaluates to False.
+    Grouped main queries are the one genuinely multi-row statement type and
+    are deliberately exempt: they stay unbounded so the guardrail's real
+    truncation behavior on them is preserved.
 
     The exclusion-rule cases (rules 2-4) follow the same anti-drift structure:
     the base filter conditions are compiled once and deep-copied into each
@@ -752,14 +779,26 @@ def compile_sql(state: GraphState) -> GraphState:
         companion_conditions.append(shared_predicate.copy())
         companions[rule] = CompanionQuery(
             rule=rule,
-            sql=_count_excluded_select(companion_conditions).sql(
-                dialect="sqlite"
-            ),
+            sql=_count_excluded_select(companion_conditions)
+            .limit(1)
+            .sql(dialect="sqlite"),
         )
 
-    state.sql_main = _aggregate_select(intent, main_conditions).sql(
-        dialect="sqlite"
-    )
+    # Compile-time single-row capping (the guardrail row-limit complement): the
+    # three statement shapes that are structurally guaranteed to return exactly
+    # one row -- a scalar (ungrouped) sql_main, the grouped-query sql_total,
+    # and every COUNT(*) companion -- are compiled with an explicit LIMIT 1.
+    # The guardrail's row-limit enforcement then sees a bound already at or
+    # below its ceiling and leaves the statement unchanged, so `truncated`
+    # correctly evaluates to False instead of misreporting a structurally
+    # single-row aggregate as limited/truncated. Grouped main queries are the
+    # one genuinely multi-row statement type and deliberately get NO such
+    # limit: they stay unbounded so their real truncation behavior is
+    # preserved.
+    main_query = _aggregate_select(intent, main_conditions)
+    if not intent.group_by:
+        main_query = main_query.limit(1)
+    state.sql_main = main_query.sql(dialect="sqlite")
 
     # Grouped-query total. When the main query is grouped, its top-level
     # aggregate is not directly answerable from the rows it returns (each row
@@ -768,14 +807,16 @@ def compile_sql(state: GraphState) -> GraphState:
     # referenced, before its second attachment to this new tree -- the same
     # anti-drift discipline the companion queries above use -- and the
     # projection is the main query's own aggregate expression with the
-    # group-by columns and the GROUP BY clause dropped. Scalar queries need no
-    # separate total: their single result row already is the top-level
-    # aggregate, so state.sql_total stays None for them.
+    # group-by columns and the GROUP BY clause dropped. The total is a scalar
+    # aggregate, guaranteed to return exactly one row, so it carries the same
+    # compile-time LIMIT 1. Scalar queries need no separate total: their single
+    # result row already is the top-level aggregate, so state.sql_total stays
+    # None for them.
     if intent.group_by:
         total_conditions = [condition.copy() for condition in main_conditions]
         state.sql_total = _scalar_aggregate_select(
             intent, total_conditions
-        ).sql(dialect="sqlite")
+        ).limit(1).sql(dialect="sqlite")
     else:
         state.sql_total = None
 

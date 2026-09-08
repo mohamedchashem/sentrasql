@@ -36,26 +36,29 @@ Implemented contracts so far:
    ``sql_companions`` -- so the companion loop above does not see it
    automatically. ``validate_guardrails`` validates it explicitly, right after
    the main query and before the companions, and on the success path stores its
-   enforced (row-limited) SQL back onto ``state.sql_total``. Its truncation
-   flag is deliberately not stored: a scalar single-row aggregate can never
-   actually be cut by row-limit enforcement.
+   enforced SQL back onto ``state.sql_total``. Its truncation flag is
+   deliberately not stored: a scalar single-row aggregate can never actually be
+   cut by row-limit enforcement.
 
 4. Success path, no companions. When the main query passes and
    ``state.sql_companions`` is empty, the node stores ``validate_sql``'s
-   enforced (row-limited) SQL back into ``state.sql_main``, propagates that
-   result's truncation flag to ``state.main_truncated``, and flips
-   ``guardrail_status`` to ``"passed"``. The main query under test has no
-   LIMIT clause, so enforcement genuinely injects the ceiling and the stored
-   SQL is observably different from the input -- never a no-op.
+   enforced SQL back into ``state.sql_main``, propagates that result's
+   truncation flag to ``state.main_truncated``, and flips ``guardrail_status``
+   to ``"passed"``. The scalar main query under test carries ``compile_sql``'s
+   own LIMIT 1 -- already at or below the guardrail's ceiling -- so
+   enforcement leaves it completely unchanged and ``main_truncated`` is
+   False: a structurally single-row aggregate must never be reported as
+   limited.
 
 5. Success path, multi-companion. When the main query and every companion
    pass, each companion's ``sql`` is overwritten with its own enforced version
    and its ``truncated`` field is set from its own ``validate_sql`` result,
-   exactly like the main query's fields. The companions are shaped so
-   enforcement produces different outcomes per statement (one already carries
-   a LIMIT at or below the ceiling and stays untouched, another has no LIMIT
-   and gains an injected one), proving the write-back is handled per companion
-   rather than by copying one value across the whole plan.
+   exactly like the main query's fields. The grouped main query is genuinely
+   multi-row, so enforcement injects the ceiling into it (``main_truncated``
+   True), while the ``COUNT(*)`` companions carry an at-or-below-ceiling bound
+   -- ``compile_sql`` emits LIMIT 1 -- and pass through unchanged
+   (``truncated`` False) -- proving the write-back is per statement rather
+   than a single value copied across the whole plan.
 """
 
 import unittest
@@ -130,15 +133,15 @@ class ValidateGuardrailsMainQueryTest(unittest.TestCase):
     """Node 5 main-query guardrail validation against the live schema."""
 
     def test_valid_main_query_with_no_companions_passes_this_stage(self):
-        # No LIMIT clause on purpose: the guardrail must inject one, so the
-        # enforced SQL stored back is observably different from the input and
-        # main_truncated is genuinely True -- not a no-op enforcement case.
+        # The scalar (ungrouped) main query now carries compile_sql's own
+        # LIMIT 1 -- structurally guaranteed to return exactly one row, so its
+        # row bound is already at or below the guardrail's ceiling. The
+        # enforced SQL stored back is therefore identical to the input and
+        # main_truncated is genuinely False -- a single-row aggregate must not
+        # be reported as limited/truncated.
         original_sql = (
-            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions"
-        )
-        enforced_sql = (
-            "SELECT SUM(quantity * unit_price) AS revenue "
-            "FROM transactions LIMIT 500"
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
+            "LIMIT 1"
         )
         state = GraphState(
             raw_query="What is total revenue?",
@@ -155,24 +158,24 @@ class ValidateGuardrailsMainQueryTest(unittest.TestCase):
 
         # Success path: the whole plan passed, so no error is set and
         # guardrail_status flips to "passed". state.sql_main is overwritten
-        # with validate_sql's enforced (row-limited) main SQL -- the input had
-        # no LIMIT, so the enforced version genuinely differs from it -- and
-        # the result's truncation flag lands on state.main_truncated (True for
-        # an injected limit). sql_companions stays empty.
+        # with validate_sql's enforced main SQL -- which equals the input,
+        # because the LIMIT 1 it already carries is at or below the ceiling --
+        # and the result's truncation flag lands on state.main_truncated
+        # (False for a bound the guardrail left untouched). sql_companions
+        # stays empty.
         self.assertIsNone(result.error)
         self.assertEqual(result.guardrail_status, "passed")
-        self.assertNotEqual(result.sql_main, original_sql)
-        self.assertEqual(result.sql_main, enforced_sql)
-        self.assertTrue(result.main_truncated)
+        self.assertEqual(result.sql_main, original_sql)
+        self.assertFalse(result.main_truncated)
         self.assertEqual(result.sql_companions, {})
         expected = GraphState(
             raw_query="What is total revenue?",
             normalized_query="total revenue",
             query_intent=QueryIntent(aggregation="sum", metric="revenue"),
-            sql_main=enforced_sql,
+            sql_main=original_sql,
             sql_companions={},
             guardrail_status="passed",
-            main_truncated=True,
+            main_truncated=False,
             error=None,
         )
         self.assertEqual(result, expected)
@@ -229,14 +232,15 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
     """Node 5 companion-query guardrail validation (runs after the main query)."""
 
     def test_all_companions_pass_and_stage_does_not_fail(self):
-        # The main query has no LIMIT (the guardrail injects one -> truncated),
-        # and the two companions are deliberately shaped so enforcement produces
-        # *different* outcomes per statement: the AVG companion already carries
-        # LIMIT 100 (at or below the 500-row ceiling -> returned unchanged,
-        # truncated False), while the CUSTOMER companion has no LIMIT (one is
-        # injected -> enforced SQL rewritten, truncated True). Only a per-
-        # companion write-back can produce both outcomes; copying one value
-        # across the whole plan would fail these assertions.
+        # The grouped main query is genuinely multi-row: it has no LIMIT, so
+        # the guardrail injects its ceiling (truncated True). The two COUNT(*)
+        # companions are both single-row aggregates that already carry an
+        # at-or-below-ceiling bound -- one compile_sql's own LIMIT 1, the other
+        # a hand-authored LIMIT 100 -- so row-limit enforcement leaves each
+        # exactly as written with truncated False. Only a per-companion
+        # write-back can preserve each companion's own sql and its own
+        # truncation flag; copying the main query's values (or one companion's
+        # values) across the whole plan would fail these assertions.
         main_sql = (
             "SELECT customer_id, AVG(unit_price) AS avg_unit_price "
             "FROM transactions WHERE unit_price != 0 "
@@ -253,7 +257,7 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
         )
         customer_sql = (
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL"
+            "WHERE customer_id IS NULL LIMIT 1"
         )
         state = GraphState(
             raw_query="What is average unit price by customer?",
@@ -297,11 +301,11 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
         self.assertTrue(result.main_truncated)
 
         # Every companion's sql/truncated is updated independently from its own
-        # validate_sql result, in place. The AVG companion's LIMIT 100 is at or
-        # below the ceiling, so its sql is left exactly as written and
-        # truncated stays False; the CUSTOMER companion had no LIMIT, so
-        # LIMIT 500 is injected into its sql and truncated flips True. Neither
-        # field is copied from the main query or from the other companion.
+        # validate_sql result, in place. Both companions' bounds (LIMIT 100 and
+        # compile_sql's LIMIT 1) are at or below the ceiling, so each sql is
+        # left exactly as written and each truncated stays False -- unlike the
+        # grouped main query's True. Neither field is copied from the main
+        # query or from the other companion.
         self.assertIs(result.sql_companions, stored_companions)
         self.assertIs(
             result.sql_companions[RuleName.AVG_EXCLUDE_ZERO_PRICE],
@@ -313,9 +317,10 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
         )
         self.assertEqual(stored_avg.sql, avg_sql)
         self.assertFalse(stored_avg.truncated)
-        self.assertNotEqual(stored_avg.truncated, stored_customer.truncated)
-        self.assertEqual(stored_customer.sql, customer_sql + " LIMIT 500")
-        self.assertTrue(stored_customer.truncated)
+        self.assertEqual(stored_customer.sql, customer_sql)
+        self.assertFalse(stored_customer.truncated)
+        self.assertNotEqual(result.main_truncated, stored_avg.truncated)
+        self.assertNotEqual(result.main_truncated, stored_customer.truncated)
 
         expected = GraphState(
             raw_query="What is average unit price by customer?",
@@ -334,8 +339,8 @@ class ValidateGuardrailsCompanionQueryTest(unittest.TestCase):
                 ),
                 RuleName.CUSTOMER_EXCLUDE_NULL: CompanionQuery(
                     rule=RuleName.CUSTOMER_EXCLUDE_NULL,
-                    sql=customer_sql + " LIMIT 500",
-                    truncated=True,
+                    sql=customer_sql,
+                    truncated=False,
                 ),
             },
             guardrail_status="passed",
@@ -475,10 +480,11 @@ class ValidateGuardrailsGroupedTotalTest(unittest.TestCase):
     ``state.sql_total`` explicitly, through the very same
     ``db.guardrails.validate_sql`` gate as ``sql_main`` and the companions,
     before any companion is validated. These tests prove that coverage against
-    the live schema the node fetches itself: a valid grouped total passes and
-    is enforced exactly like the main query; a failing total rejects the whole
-    plan (hard stop, nothing written back, companions never reached); and a
-    scalar query with no total skips the stage entirely.
+    the live schema the node fetches itself: a valid grouped total passes
+    through unchanged (its compile-time LIMIT 1 is at or below the ceiling)
+    while the grouped main query is genuinely row-limited; a failing total
+    rejects the whole plan (hard stop, nothing written back, companions never
+    reached); and a scalar query with no total skips the stage entirely.
     """
 
     def test_grouped_query_total_is_validated_and_enforced_alongside_main(self):
@@ -508,14 +514,17 @@ class ValidateGuardrailsGroupedTotalTest(unittest.TestCase):
 
         result = validate_guardrails(state)
 
-        # The whole plan -- main AND total -- passed the guardrail, and the
-        # total went through the same row-limit enforcement as every statement:
-        # it has no LIMIT of its own, so the ceiling is injected just like
-        # sql_main's. The total is stored back onto state.sql_total (its own
-        # field), never into sql_companions.
+        # The whole plan -- main AND total -- passed the guardrail. The grouped
+        # main is genuinely multi-row, so row-limit enforcement injects the
+        # ceiling into it (sql rewritten, main_truncated True). The total is a
+        # scalar aggregate that already carries compile_sql's LIMIT 1 -- at or
+        # below the ceiling -- so enforcement leaves it exactly as written
+        # (its own truncation flag is deliberately not stored, and validate_sql
+        # reports False for it). The total is stored back onto state.sql_total
+        # (its own field), never into sql_companions.
         self.assertIsNone(result.error)
         self.assertEqual(result.guardrail_status, "passed")
-        self.assertEqual(result.sql_total, original_total_sql + " LIMIT 500")
+        self.assertEqual(result.sql_total, original_total_sql)
         self.assertEqual(result.sql_main, original_main_sql + " LIMIT 500")
         self.assertTrue(result.main_truncated)
         self.assertEqual(result.sql_companions, {})
@@ -535,11 +544,18 @@ class ValidateGuardrailsGroupedTotalTest(unittest.TestCase):
             )
         )
         self.assertIsNone(state.sql_total)
+        # The scalar main is a single-row aggregate carrying compile_sql's own
+        # LIMIT 1, so validate_guardrails must pass it through unchanged with
+        # no truncation reported -- not inject the ceiling.
+        self.assertTrue(state.sql_main.endswith("LIMIT 1"))
+        original_main_sql = state.sql_main
 
         result = validate_guardrails(state)
         self.assertIsNone(result.error)
         self.assertEqual(result.guardrail_status, "passed")
         self.assertIsNone(result.sql_total)
+        self.assertEqual(result.sql_main, original_main_sql)
+        self.assertFalse(result.main_truncated)
 
     def test_failing_total_rejects_plan_before_companions_and_writes_nothing(
         self,

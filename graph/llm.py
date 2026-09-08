@@ -128,12 +128,18 @@ def get_answer_model() -> Runnable[LanguageModelInput, AnswerSegments]:
 
     Binding: ``with_structured_output(AnswerSegments, strict=True)`` returns a
     runnable whose invocations produce validated ``AnswerSegments`` instances.
-    The schema's items are a discriminated union on ``"type"`` -- ``"text"``
-    segments carry a ``content`` string, ``"ref"`` segments carry a
-    reference-dictionary ``key`` -- so Pydantic (the only real enforcement
-    layer for value-level constraints; DESIGN_LOG.md section 16) rejects any
-    segment that mixes or omits the fields of its declared kind before
-    downstream rendering logic ever sees it.
+    ``AnswerSegment`` is a plain union of the two segment shapes, each carrying
+    a required ``type`` literal and ``extra="forbid"`` -- ``"text"`` segments
+    carry a ``content`` string, ``"ref"`` segments carry a reference-dictionary
+    ``key`` -- so Pydantic (the only real enforcement layer for value-level
+    constraints; DESIGN_LOG.md section 16) rejects any segment that mixes or
+    omits the fields of its declared kind before downstream rendering logic
+    ever sees it. DeepSeek's strict endpoint requires the union's ``anyOf``
+    branches to be fully inlined object schemas (it rejects ``$ref``/``$defs``
+    members), so the Pydantic class -- not a raw ``model_json_schema()`` dict,
+    which still uses ``$defs`` -- is passed here: langchain-core's tool-schema
+    conversion dereferences those references before the request is sent, which
+    keeps the Pydantic models the single source of truth.
 
     Returns:
         A runnable chat model: same inputs as any LangChain chat model, outputs

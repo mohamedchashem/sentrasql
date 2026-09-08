@@ -9,7 +9,11 @@ structured-output model (``graph.llm.get_answer_model``) with that prompt,
 runs the emitted segments through the deterministic gate
 ``graph.segment_validator.validate_segments`` with exactly one retry on
 failure (recorded via ``state.answer_generation_retried``), and finally
-renders the validated segments into ``state.final_answer``. Rendering is real
+renders the validated segments into ``state.final_answer``. The deterministic
+setup that builds those two pieces runs before the retry envelope: an
+exception there is a terminal ``answer_generation_failed:setup_error:<Class>``
+with no retry, because retrying the model call cannot fix a deterministic
+setup failure. Rendering is real
 deterministic code and therefore runs inside the attempt loop: an exception
 raised after validation passed is a failure reason like any other
 (``render_error:<ExceptionClassName>``) and is retried exactly once, because a
@@ -39,6 +43,14 @@ _ANSWER_GENERATION_FAILED_PREFIX = "answer_generation_failed"
 # exception there is its own failure reason -- routed through the same
 # retry-then-error path as every other failure type.
 _RENDER_ERROR_PREFIX = "render_error"
+
+# Machine-readable failure detail for an exception raised by the deterministic
+# setup phase that runs BEFORE the retry envelope (``build_reference_dict`` /
+# ``build_answer_prompt``). A setup failure is deterministic -- a result shape
+# the reference builder did not anticipate, a prompt build that fails -- so
+# retrying the LLM call cannot fix it; it becomes the terminal
+# ``answer_generation_failed:setup_error:<ExceptionClassName>`` with no retry.
+_SETUP_ERROR_PREFIX = "setup_error"
 
 # Plain-text representation choices for the deterministic sections rendered
 # after the model-authored intro. The grouped table is deliberately NOT
@@ -257,7 +269,11 @@ def assemble_answer(state: GraphState) -> GraphState:
     Setup (gate passed): builds the flat reference dictionary by genuinely
     calling ``build_reference_dict(state.main_results, state.query_intent)``
     with this state's real data, then builds this call's prompt from that
-    actual dictionary via ``build_answer_prompt``.
+    actual dictionary via ``build_answer_prompt``. Both steps are deterministic
+    and run before the retry envelope: any exception they raise (an unexpected
+    result shape, a lookup that misses, a prompt-build failure) is a terminal
+    ``answer_generation_failed:setup_error:<ExceptionClassName>`` with no retry
+    -- never a crash and never a wasted retry of the LLM call.
 
     Generation, validation, and rendering: invokes the strict structured-output
     model (``get_answer_model``) with a SystemMessage built from that prompt
@@ -283,10 +299,15 @@ def assemble_answer(state: GraphState) -> GraphState:
     different model response can render cleanly. The retry is recorded via
     ``state.answer_generation_retried``.
 
-    Second failure: routes to the error path. ``state.error`` carries the
-    first/primary collected reason of the FINAL attempt and
-    ``state.error_reasons`` the full reason list of that same final attempt --
-    never the first attempt's reasons (each entry uses the exact
+    Second failure: the node never composes a user-facing message itself -- it
+    records the failure on the state (``state.error`` plus, for this node,
+    ``state.error_reasons``) and returns it. The graph's conditional edge after
+    this node (``graph.build._route_after_answer``) then routes a state
+    carrying ``state.error`` to ``handle_error``, which composes the message
+    into ``state.final_answer``. ``state.error`` carries the first/primary
+    collected reason of the FINAL attempt and ``state.error_reasons`` the full
+    reason list of that same final attempt -- never the first attempt's
+    reasons (each entry uses the exact
     ``answer_generation_failed:<underlying_reason>`` form, so a render
     exception surfaces as ``answer_generation_failed:render_error:<Class>``).
     """
@@ -302,15 +323,22 @@ def assemble_answer(state: GraphState) -> GraphState:
         return state
 
     # --- Setup only: no LLM invocation, no rendering, no retry yet. ---
-    # 1. Reference dictionary from the state's own executed results and parsed
-    #    intent -- the real builder over the real state data, never a
-    #    placeholder or example dictionary.
-    references = build_reference_dict(state.main_results, state.query_intent)
-
-    # 2. Per-call answer prompt: every key that actually exists in the
-    #    dictionary for THIS query (key name plus value), the segment-structure
-    #    instructions, and the no-digits-in-text rule restated plainly.
-    prompt = build_answer_prompt(references)
+    # The reference-dictionary build and prompt construction are deterministic
+    # local work that precedes the retry envelope: an exception here (an
+    # unexpected result shape, a lookup that misses, a prompt build failure)
+    # is a terminal setup failure -- retrying the model call cannot fix a
+    # deterministic setup failure -- so it is caught and recorded as
+    # ``answer_generation_failed:setup_error:<ExceptionClass>`` with no retry,
+    # never allowed to escape and crash the graph.
+    try:
+        references = build_reference_dict(state.main_results, state.query_intent)
+        prompt = build_answer_prompt(references)
+    except Exception as exc:
+        state.error = (
+            f"{_ANSWER_GENERATION_FAILED_PREFIX}:{_SETUP_ERROR_PREFIX}:"
+            f"{type(exc).__name__}"
+        )
+        return state
 
     # --- LLM invocation with exactly one retry, render included per attempt. ---
     # The bound model and the base prompt are built once and shared by both
@@ -393,7 +421,9 @@ def assemble_answer(state: GraphState) -> GraphState:
         state.final_answer = rendered_answer
         return state
 
-    # Second failure: route to the error path. state.error carries the
+    # Second failure: the node records the failure (state.error plus
+    # state.error_reasons); the graph's conditional edge after this node routes
+    # the errored state to ``handle_error``. state.error carries the
     # first/primary collected reason of the FINAL attempt and
     # state.error_reasons carries the full reason list of that same final
     # attempt -- never the first attempt's reasons. A render exception on both

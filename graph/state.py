@@ -8,9 +8,9 @@ imports -- data shapes only.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RuleName(str, Enum):
@@ -214,7 +214,8 @@ class TextSegment(BaseModel):
     """Literal-prose segment of an answer template.
 
     Attributes:
-        type: Segment-kind discriminator; always ``"text"``.
+        type: Segment-kind tag; always ``"text"``. Required (no default):
+            ``type`` is what lets the ``AnswerSegment`` union pick this shape.
         content: Literal prose. After every ``ref`` segment in the template has
             been substituted from the reference dictionary, ``content`` appears
             in the final answer verbatim. Must never contain a digit: every
@@ -223,7 +224,9 @@ class TextSegment(BaseModel):
             ``graph.segment_validator.validate_segments``).
     """
 
-    type: Literal["text"] = "text"
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"]
     content: str
 
 
@@ -231,7 +234,8 @@ class RefSegment(BaseModel):
     """Substitution-hole segment of an answer template.
 
     Attributes:
-        type: Segment-kind discriminator; always ``"ref"``.
+        type: Segment-kind tag; always ``"ref"``. Required (no default):
+            ``type`` is what lets the ``AnswerSegment`` union pick this shape.
         key: A key into the flat ``dict[str, str]`` reference dictionary built
             by ``graph.reference_dict.build_reference_dict`` (e.g.
             ``result.total``, ``result.rows.0.country``, ``filters.country``,
@@ -239,16 +243,25 @@ class RefSegment(BaseModel):
             pre-formatted value.
     """
 
-    type: Literal["ref"] = "ref"
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["ref"]
     key: str
 
 
-# One answer-template item: a discriminated union on ``"type"``, so a segment
-# is always exactly one of the two shapes above and Pydantic rejects a segment
-# that carries the wrong or missing field for its declared kind.
-AnswerSegment = Annotated[
-    TextSegment | RefSegment, Field(discriminator="type")
-]
+# One answer-template item: a plain union of the two possible segment shapes
+# (no JSON-Schema ``discriminator``/``oneOf`` construct -- the spelling the
+# strict structured-output endpoint rejects). Each member carries a required
+# ``type`` literal and ``extra="forbid"``, so Pydantic still rejects a segment
+# that mixes fields, omits its payload, or carries an unknown tag.
+#
+# The raw Pydantic JSON schema for this union still emits ``$defs`` + ``$ref``
+# pointers inside ``anyOf``; the schema actually transmitted to DeepSeek's
+# strict endpoint has those pointers dereferenced into fully inlined ``anyOf``
+# members by langchain-core's tool-schema conversion (see ``graph.llm`` and
+# tests/test_answer_segments_model.py). The models here stay the single source
+# of truth -- no hand-written schema dict is ever kept in sync with them.
+AnswerSegment = TextSegment | RefSegment
 
 
 class AnswerSegments(BaseModel):

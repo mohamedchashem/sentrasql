@@ -48,9 +48,12 @@ _QUERY_EXECUTION_FAILED_MAIN_REASON = "query_execution_failed:main"
 # database-level exception while running the derived total query, and
 # ``query_result_shape_invalid:total`` covers a total result that is not the
 # single-row, single-column aggregate record the derived query is guaranteed
-# to produce when compile_sql built the statement. Neither path is reachable
-# on a guardrail-passed, compile_sql-built statement; both exist so an
-# upstream inconsistency can never crash the graph or silently drop the total.
+# to produce when compile_sql built the statement -- including a NULL total
+# aggregate value while the breakdown returned rows, which is an internal
+# inconsistency (rows in one imply a non-NULL total, since the two share
+# filters and aggregate). Neither path is reachable on a guardrail-passed,
+# compile_sql-built statement; both exist so an upstream inconsistency can
+# never crash the graph or silently drop the total.
 _QUERY_EXECUTION_FAILED_TOTAL_REASON = "query_execution_failed:total"
 
 
@@ -163,6 +166,15 @@ def execute_queries(state: GraphState) -> GraphState:
     valid, non-failure outcome (an empty list, distinct from ``None`` = "not
     executed yet").
 
+    Scalar (ungrouped) SUM/AVG over an empty window: SQLite's scalar
+    aggregates still return exactly one row when no rows matched, and for
+    SUM/AVG that row carries a NULL aggregate value -- the SQL representation
+    of "nothing to aggregate". That single-NULL-aggregate row is normalized to
+    the same documented empty list (``main_results == []``), so a scalar query
+    over a zero-row window and a grouped query that matched no rows produce
+    the identical "no rows matched" shape, never a misleading NULL-valued
+    record.
+
     Grouped totals (DESIGN_LOG.md section 20): when the executed
     ``state.sql_main`` is a SELECT carrying a GROUP BY and returned at least
     one row, the node additionally derives and runs the matching ungrouped
@@ -179,7 +191,13 @@ def execute_queries(state: GraphState) -> GraphState:
     total"`` -- never the main-query code, which would wrongly blame a query
     that already succeeded. A grouped query that matched no rows keeps the
     empty list: with no breakdown there is nothing for a total to summarize,
-    and a SUM over no rows is NULL, not a trustworthy aggregate.
+    and a SUM over no rows is NULL, not a trustworthy aggregate. A derived
+    total whose single aggregate value is NULL *while the breakdown returned
+    rows* is treated as an internal inconsistency and fails with the same
+    ``"query_result_shape_invalid:total"`` reason -- never a silent empty list.
+    This path is defensive: once the compile_sql metric gate is in place it is
+    unreachable on a guardrail-passed statement, because the total shares the
+    breakdown's filters and aggregate, so rows in one imply a non-NULL total.
 
     Only once the main query has succeeded do companions run, each in
     ``state.sql_companions`` dict order on the same connection -- including
@@ -237,6 +255,23 @@ def execute_queries(state: GraphState) -> GraphState:
                 return state
             main_results.append(dict(zip(main_column_names, row)))
 
+        # Whether the main statement is grouped, decided once and reused by the
+        # scalar normalization and the grouped-total blocks below.
+        total_sql = _grouped_total_sql(state.sql_main)
+
+        # Scalar (ungrouped) main query over an empty window: SQLite's scalar
+        # aggregates return exactly one row even when no rows matched, and for
+        # SUM/AVG that row's aggregate value is NULL -- the SQL representation
+        # of "nothing to aggregate". Normalize that single-NULL-aggregate row
+        # to the documented empty list, so a scalar query over a zero-row
+        # window produces exactly the same shape as a grouped query that
+        # matched no rows: main_results == [], never a misleading NULL-valued
+        # record, and never an error.
+        if total_sql is None and len(main_results) == 1:
+            single_row = main_results[0]
+            if len(single_row) == 1 and next(iter(single_row.values())) is None:
+                main_results = []
+
         # Grouped top-level aggregate (DESIGN_LOG.md section 20). When the main
         # query is grouped and produced rows, derive and run the matching
         # ungrouped total query (guaranteed by _grouped_total_sql to be a
@@ -247,27 +282,34 @@ def execute_queries(state: GraphState) -> GraphState:
         # ":total"-suffixed reasons so the already-succeeded main query is
         # never blamed. Zero main rows stays the empty list (no breakdown, no
         # total), exactly as before this change.
-        if main_results:
-            total_sql = _grouped_total_sql(state.sql_main)
-            if total_sql is not None:
-                try:
-                    total_column_names, total_rows = _fetch_query(
-                        conn, total_sql
-                    )
-                except sqlite3.Error:
-                    state.error = _QUERY_EXECUTION_FAILED_TOTAL_REASON
-                    return state
-                if (
-                    len(total_rows) != 1
-                    or len(total_column_names) != 1
-                    or len(total_rows[0]) != len(total_column_names)
-                ):
-                    state.error = _QUERY_RESULT_SHAPE_INVALID_TOTAL_REASON
-                    return state
-                main_results = {
-                    "rows": main_results,
-                    "total": dict(zip(total_column_names, total_rows[0])),
-                }
+        if main_results and total_sql is not None:
+            try:
+                total_column_names, total_rows = _fetch_query(
+                    conn, total_sql
+                )
+            except sqlite3.Error:
+                state.error = _QUERY_EXECUTION_FAILED_TOTAL_REASON
+                return state
+            if (
+                len(total_rows) != 1
+                or len(total_column_names) != 1
+                or len(total_rows[0]) != len(total_column_names)
+            ):
+                state.error = _QUERY_RESULT_SHAPE_INVALID_TOTAL_REASON
+                return state
+            # A NULL total while the breakdown returned rows is an internal
+            # inconsistency, not an empty result: the total shares the
+            # breakdown's filters and aggregate, so rows in one imply a
+            # non-NULL total. Defensive (the compile_sql metric gate makes it
+            # unreachable in practice); fails loudly rather than silently
+            # producing a wrapper whose total carries NULL.
+            if total_rows[0][0] is None:
+                state.error = _QUERY_RESULT_SHAPE_INVALID_TOTAL_REASON
+                return state
+            main_results = {
+                "rows": main_results,
+                "total": dict(zip(total_column_names, total_rows[0])),
+            }
 
         # Companion queries. Each runs only after the main query succeeded, in
         # dict order, and even when the main query returned zero rows -- a

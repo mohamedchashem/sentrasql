@@ -105,6 +105,7 @@ def _compile(
     filters: Filters | None = None,
     rules: list[RuleName] | None = None,
     net_gross: str = "net",
+    distinct: bool = False,
 ) -> GraphState:
     """Build a GraphState and run compile_sql on it.
 
@@ -122,6 +123,7 @@ def _compile(
         query_intent=QueryIntent(
             aggregation=aggregation,
             metric=metric,
+            distinct=distinct,
             group_by=group_by,
             filters=filters or Filters(),
             net_gross=net_gross,
@@ -153,7 +155,7 @@ class CompileSqlBaseCaseTest(unittest.TestCase):
         state = _compile()
         self.assertEqual(
             state.sql_main,
-            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions",
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -171,7 +173,7 @@ class CompileSqlBaseCaseTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE country = 'United Kingdom'",
+            "WHERE country = 'United Kingdom' LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -179,7 +181,7 @@ class CompileSqlBaseCaseTest(unittest.TestCase):
         state = _compile(aggregation="avg", metric="unit_price")
         self.assertEqual(
             state.sql_main,
-            "SELECT AVG(unit_price) AS unit_price FROM transactions",
+            "SELECT AVG(unit_price) AS unit_price FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -226,7 +228,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE unit_price <> 0",
+            "WHERE unit_price <> 0 LIMIT 1",
         )
         self.assertEqual(len(state.sql_companions), 1)
         companion = state.sql_companions[self.RULE]
@@ -234,7 +236,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
         self.assertEqual(companion.status, "pending")
         self.assertIsNone(companion.excluded_count)
@@ -248,7 +250,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE country = 'United Kingdom' AND unit_price <> 0",
+            "WHERE country = 'United Kingdom' AND unit_price <> 0 LIMIT 1",
         )
 
         # AST-level check of the AND composition: the WHERE root is an AND over
@@ -269,7 +271,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND unit_price = 0",
+            "WHERE country = 'United Kingdom' AND unit_price = 0 LIMIT 1",
         )
         companion_where = parse(companion.sql, read="sqlite")[0].find(
             exp.Where
@@ -296,7 +298,7 @@ class CompileSqlAvgExcludeZeroPriceTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[self.RULE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
 
     def test_avg_rule_listed_twice_is_still_the_only_rule(self):
@@ -329,7 +331,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE customer_id IS NOT NULL",
+            "WHERE customer_id IS NOT NULL LIMIT 1",
         )
         self.assertEqual(len(state.sql_companions), 1)
         companion = state.sql_companions[self.RULE]
@@ -337,7 +339,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
         self.assertEqual(companion.status, "pending")
         self.assertIsNone(companion.excluded_count)
@@ -351,7 +353,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE country = 'United Kingdom' AND customer_id IS NOT NULL",
+            "WHERE country = 'United Kingdom' AND customer_id IS NOT NULL LIMIT 1",
         )
 
         # AST-level check of the AND composition: the WHERE root is an AND over
@@ -374,7 +376,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND customer_id IS NULL",
+            "WHERE country = 'United Kingdom' AND customer_id IS NULL LIMIT 1",
         )
         companion_where = parse(companion.sql, read="sqlite")[0].find(
             exp.Where
@@ -401,7 +403,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[self.RULE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
 
     def test_customer_rule_listed_twice_is_still_the_only_rule(self):
@@ -415,7 +417,7 @@ class CompileSqlCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE customer_id IS NOT NULL",
+            "WHERE customer_id IS NOT NULL LIMIT 1",
         )
         self.assertEqual(len(state.sql_companions), 1)
 
@@ -439,7 +441,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE line_item_type = 'product'",
+            "WHERE line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(len(state.sql_companions), 1)
         companion = state.sql_companions[self.RULE]
@@ -447,7 +449,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE line_item_type <> 'product'",
+            "WHERE line_item_type <> 'product' LIMIT 1",
         )
         self.assertEqual(companion.status, "pending")
         self.assertIsNone(companion.excluded_count)
@@ -461,7 +463,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE country = 'United Kingdom' AND line_item_type = 'product'",
+            "WHERE country = 'United Kingdom' AND line_item_type = 'product' LIMIT 1",
         )
 
         # AST-level check of the AND composition: the WHERE root is an AND over
@@ -482,7 +484,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND line_item_type <> 'product'",
+            "WHERE country = 'United Kingdom' AND line_item_type <> 'product' LIMIT 1",
         )
         companion_where = parse(companion.sql, read="sqlite")[0].find(
             exp.Where
@@ -509,7 +511,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[self.RULE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE line_item_type <> 'product'",
+            "WHERE line_item_type <> 'product' LIMIT 1",
         )
 
     def test_product_rule_listed_twice_is_still_the_only_rule(self):
@@ -524,7 +526,7 @@ class CompileSqlProductExcludeNonProductTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE line_item_type = 'product'",
+            "WHERE line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(len(state.sql_companions), 1)
 
@@ -557,19 +559,19 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE unit_price <> 0 AND customer_id IS NOT NULL",
+            "WHERE unit_price <> 0 AND customer_id IS NOT NULL LIMIT 1",
         )
         # ...and both companions must be populated, one per fired rule.
         self.assertEqual(set(state.sql_companions), set(self.RULES))
         self.assertEqual(
             state.sql_companions[RuleName.AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
 
     def test_both_negations_compose_onto_main_over_unrelated_filter(self):
@@ -581,7 +583,7 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND customer_id IS NOT NULL",
+            "AND customer_id IS NOT NULL LIMIT 1",
         )
 
         # AST-level check: flattening the AND tree yields exactly the country
@@ -607,12 +609,12 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[RuleName.AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND unit_price = 0",
+            "WHERE country = 'United Kingdom' AND unit_price = 0 LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND customer_id IS NULL",
+            "WHERE country = 'United Kingdom' AND customer_id IS NULL LIMIT 1",
         )
 
     def test_applicable_rule_order_does_not_change_the_compiled_query(self):
@@ -631,7 +633,7 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND customer_id IS NOT NULL",
+            "AND customer_id IS NOT NULL LIMIT 1",
         )
         self.assertEqual(set(state.sql_companions), set(self.RULES))
 
@@ -651,7 +653,7 @@ class CompileSqlAvgAndCustomerExcludeNullTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE unit_price <> 0 AND customer_id IS NOT NULL",
+            "WHERE unit_price <> 0 AND customer_id IS NOT NULL LIMIT 1",
         )
         self.assertEqual(set(state.sql_companions), set(self.RULES))
 
@@ -687,23 +689,23 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE unit_price <> 0 AND customer_id IS NOT NULL "
-            "AND line_item_type = 'product'",
+            "AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(set(state.sql_companions), set(self.RULES))
         self.assertEqual(
             state.sql_companions[RuleName.AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE unit_price = 0",
+            "WHERE unit_price = 0 LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE customer_id IS NULL",
+            "WHERE customer_id IS NULL LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.PRODUCT_EXCLUDE_NONPRODUCT].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE line_item_type <> 'product'",
+            "WHERE line_item_type <> 'product' LIMIT 1",
         )
 
     def test_all_three_negations_compose_onto_main_over_unrelated_filter(self):
@@ -715,7 +717,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND customer_id IS NOT NULL AND line_item_type = 'product'",
+            "AND customer_id IS NOT NULL AND line_item_type = 'product' LIMIT 1",
         )
 
         # AST-level check: flattening the AND tree yields exactly the country
@@ -744,17 +746,17 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
         self.assertEqual(
             state.sql_companions[RuleName.AVG_EXCLUDE_ZERO_PRICE].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND unit_price = 0",
+            "WHERE country = 'United Kingdom' AND unit_price = 0 LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.CUSTOMER_EXCLUDE_NULL].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND customer_id IS NULL",
+            "WHERE country = 'United Kingdom' AND customer_id IS NULL LIMIT 1",
         )
         self.assertEqual(
             state.sql_companions[RuleName.PRODUCT_EXCLUDE_NONPRODUCT].sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND line_item_type <> 'product'",
+            "WHERE country = 'United Kingdom' AND line_item_type <> 'product' LIMIT 1",
         )
 
     def test_rule_2_plus_rule_4_compose(self):
@@ -771,7 +773,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND line_item_type = 'product'",
+            "AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions),
@@ -793,7 +795,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
-            "WHERE customer_id IS NOT NULL AND line_item_type = 'product'",
+            "WHERE customer_id IS NOT NULL AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions),
@@ -820,7 +822,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND customer_id IS NOT NULL AND line_item_type = 'product'",
+            "AND customer_id IS NOT NULL AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(set(state.sql_companions), set(self.RULES))
 
@@ -842,7 +844,7 @@ class CompileSqlThreeExclusionsTest(unittest.TestCase):
             state.sql_main,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE unit_price <> 0 AND customer_id IS NOT NULL "
-            "AND line_item_type = 'product'",
+            "AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(set(state.sql_companions), set(self.RULES))
 
@@ -880,7 +882,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         state = self._compile_net_vs_gross("net")
         self.assertEqual(
             state.sql_main,
-            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions",
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         # Genuinely no WHERE clause anywhere in the parsed SELECT, not even an
@@ -894,7 +896,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE country = 'United Kingdom'",
+            "WHERE country = 'United Kingdom' LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         # The only WHERE condition is the user's country equality -- the rule
@@ -909,7 +911,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE invoice_id NOT LIKE 'C%'",
+            "WHERE invoice_id NOT LIKE 'C%' LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         # AST-level check that the condition is a genuinely negated LIKE node,
@@ -927,7 +929,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE country = 'United Kingdom' AND invoice_id NOT LIKE 'C%'",
+            "WHERE country = 'United Kingdom' AND invoice_id NOT LIKE 'C%' LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         where_condition = parse(
@@ -947,7 +949,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE quantity < 0",
+            "WHERE quantity < 0 LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         where_condition = parse(
@@ -962,7 +964,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE country = 'United Kingdom' AND quantity < 0",
+            "WHERE country = 'United Kingdom' AND quantity < 0 LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
         where_condition = parse(
@@ -1040,7 +1042,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
             "WHERE country = 'United Kingdom' AND invoice_id NOT LIKE 'C%' "
-            "AND unit_price <> 0",
+            "AND unit_price <> 0 LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions), {RuleName.AVG_EXCLUDE_ZERO_PRICE}
@@ -1049,7 +1051,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND unit_price = 0",
+            "WHERE country = 'United Kingdom' AND unit_price = 0 LIMIT 1",
         )
 
     def test_returns_variant_composes_with_product_exclusion_rule(self):
@@ -1062,7 +1064,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
             "WHERE country = 'United Kingdom' AND quantity < 0 "
-            "AND line_item_type = 'product'",
+            "AND line_item_type = 'product' LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions), {RuleName.PRODUCT_EXCLUDE_NONPRODUCT}
@@ -1071,7 +1073,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             companion.sql,
             "SELECT COUNT(*) AS excluded_count FROM transactions "
-            "WHERE country = 'United Kingdom' AND line_item_type <> 'product'",
+            "WHERE country = 'United Kingdom' AND line_item_type <> 'product' LIMIT 1",
         )
 
     def test_net_variant_composes_with_customer_null_exclusion_rule(self):
@@ -1086,7 +1088,7 @@ class CompileSqlNetVsGrossTest(unittest.TestCase):
         self.assertEqual(
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE country = 'United Kingdom' AND customer_id IS NOT NULL",
+            "WHERE country = 'United Kingdom' AND customer_id IS NOT NULL LIMIT 1",
         )
         self.assertEqual(
             set(state.sql_companions), {RuleName.CUSTOMER_EXCLUDE_NULL}
@@ -1117,7 +1119,7 @@ class CompileSqlGroupedTotalTest(unittest.TestCase):
         )
         self.assertEqual(
             state.sql_total,
-            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions",
+            "SELECT SUM(quantity * unit_price) AS revenue FROM transactions LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
@@ -1170,7 +1172,7 @@ class CompileSqlGroupedTotalTest(unittest.TestCase):
             state.sql_total,
             "SELECT AVG(unit_price) AS unit_price FROM transactions "
             "WHERE country = 'United Kingdom' AND unit_price <> 0 "
-            "AND customer_id IS NOT NULL",
+            "AND customer_id IS NOT NULL LIMIT 1",
         )
 
         # AST-level identical filter/exclusion conditions: both WHERE trees
@@ -1238,8 +1240,158 @@ class CompileSqlGroupedTotalTest(unittest.TestCase):
         self.assertEqual(
             state.sql_total,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
-            "WHERE invoice_id NOT LIKE 'C%'",
+            "WHERE invoice_id NOT LIKE 'C%' LIMIT 1",
         )
+
+
+class CompileSqlSingleRowLimitTest(unittest.TestCase):
+    """Compile-time LIMIT 1 attachment for every single-row statement shape.
+
+    compile_sql attaches an explicit LIMIT 1 to every statement that is
+    structurally guaranteed to return exactly one row: the scalar (ungrouped)
+    ``sql_main``, the grouped-query ``sql_total``, and every ``COUNT(*)``
+    companion. The guardrail's row-limit enforcement then sees a bound already
+    at or below its ceiling and leaves the statement unchanged, so its
+    ``truncated`` flag correctly evaluates to False -- a single-row aggregate
+    must never be misreported as limited. Grouped main queries are the one
+    genuinely multi-row statement type and must NOT get the limit: they stay
+    unbounded so their real truncation behavior is preserved.
+    """
+
+    SCHEMA = _read_schema()
+
+    def test_scalar_sql_main_carries_limit_1(self):
+        # Every scalar (ungrouped) main shape -- the base case, a filtered
+        # base case, a NET_VS_GROSS variant, and an exclusion-rule main --
+        # ends with an explicit LIMIT 1, not just on the default revenue SUM.
+        for state in (
+            _compile(),
+            _compile(aggregation="avg", metric="unit_price"),
+            _compile(filters=_country_filters("United Kingdom")),
+            _compile(
+                aggregation="avg",
+                metric="unit_price",
+                rules=[RuleName.AVG_EXCLUDE_ZERO_PRICE],
+            ),
+            _compile(
+                net_gross="returns",
+                rules=[RuleName.NET_VS_GROSS],
+            ),
+        ):
+            with self.subTest(sql_main=state.sql_main):
+                self.assertIsNone(state.error)
+                self.assertTrue(state.sql_main.endswith("LIMIT 1"))
+                limit = parse(state.sql_main, read="sqlite")[0].args.get(
+                    "limit"
+                )
+                self.assertIsNotNone(limit)
+                self.assertEqual(
+                    limit.expression.sql(dialect="sqlite"), "1"
+                )
+
+    def test_sql_total_carries_limit_1(self):
+        # The grouped-query total is a scalar aggregate over the main query's
+        # conditions, so it too is guaranteed to return one row and must carry
+        # LIMIT 1 -- including when the main query fires rules (2 and 3 here).
+        state = _compile(
+            group_by=["country", "customer_id"],
+            rules=[
+                RuleName.AVG_EXCLUDE_ZERO_PRICE,
+                RuleName.CUSTOMER_EXCLUDE_NULL,
+            ],
+        )
+        self.assertIsNone(state.error)
+        self.assertIsNotNone(state.sql_total)
+        self.assertTrue(state.sql_total.endswith("LIMIT 1"))
+        total_ast = parse(state.sql_total, read="sqlite")[0]
+        self.assertEqual(
+            total_ast.args["limit"].expression.sql(dialect="sqlite"), "1"
+        )
+
+    def test_every_companion_carries_limit_1(self):
+        # With all three exclusion rules firing, every CompanionQuery in
+        # sql_companions is a COUNT(*) query guaranteed to return one row, and
+        # every one of them must carry its own LIMIT 1.
+        state = _compile(
+            aggregation="avg",
+            metric="unit_price",
+            filters=_country_filters("United Kingdom"),
+            rules=[
+                RuleName.AVG_EXCLUDE_ZERO_PRICE,
+                RuleName.CUSTOMER_EXCLUDE_NULL,
+                RuleName.PRODUCT_EXCLUDE_NONPRODUCT,
+            ],
+        )
+        self.assertIsNone(state.error)
+        self.assertEqual(len(state.sql_companions), 3)
+        for rule, companion in state.sql_companions.items():
+            with self.subTest(rule=rule):
+                self.assertTrue(companion.sql.endswith("LIMIT 1"))
+                self.assertEqual(
+                    parse(companion.sql, read="sqlite")[0]
+                    .args["limit"]
+                    .expression.sql(dialect="sqlite"),
+                    "1",
+                )
+
+
+    def test_grouped_sql_main_does_not_carry_limit_1_and_stays_truncatable(self):
+        # The grouped main is the one genuinely multi-row statement type: it
+        # must NOT receive the single-row LIMIT 1. It stays unbounded, so the
+        # guardrail's row-limit enforcement still injects its ceiling and
+        # reports truncated True.
+        state = _compile(group_by=["country"])
+        self.assertIsNone(state.error)
+        self.assertIn("GROUP BY country", state.sql_main)
+        self.assertFalse(state.sql_main.endswith("LIMIT 1"))
+        self.assertIsNone(
+            parse(state.sql_main, read="sqlite")[0].args.get("limit")
+        )
+
+        passed, reason, enforced_sql, truncated = validate_sql(
+            state.sql_main, self.SCHEMA
+        )
+        self.assertTrue(passed, reason)
+        self.assertTrue(truncated)
+        self.assertTrue(enforced_sql.endswith("LIMIT 500"))
+
+    def test_single_row_statements_pass_through_guardrail_untruncated(self):
+        # End-to-end: compile representative single-row statements and run each
+        # through db.guardrails.validate_sql exactly as the graph's
+        # validate_guardrails node does. With compile_sql's LIMIT 1 already at
+        # or below the ceiling, the guardrail must return each statement
+        # unchanged with truncated False -- never inject LIMIT 500 or report a
+        # structurally single-row aggregate as limited.
+        scalar_state = _compile(
+            aggregation="avg",
+            metric="unit_price",
+            filters=_country_filters("United Kingdom"),
+            rules=[RuleName.AVG_EXCLUDE_ZERO_PRICE],
+        )
+        grouped_state = _compile(
+            group_by=["country"],
+            rules=[RuleName.AVG_EXCLUDE_ZERO_PRICE],
+        )
+
+        statements = {
+            "scalar sql_main": scalar_state.sql_main,
+            "scalar companion": scalar_state.sql_companions[
+                RuleName.AVG_EXCLUDE_ZERO_PRICE
+            ].sql,
+            "grouped sql_total": grouped_state.sql_total,
+            "grouped companion": grouped_state.sql_companions[
+                RuleName.AVG_EXCLUDE_ZERO_PRICE
+            ].sql,
+        }
+        for label, sql in statements.items():
+            with self.subTest(statement=label):
+                self.assertIsNotNone(sql)
+                passed, reason, enforced_sql, truncated = validate_sql(
+                    sql, self.SCHEMA
+                )
+                self.assertTrue(passed, reason)
+                self.assertEqual(enforced_sql, sql)
+                self.assertFalse(truncated)
 
 
 @unittest.skipUnless(
@@ -2042,18 +2194,21 @@ class CompileSqlNetVsGrossAndZeroPriceLiveDbTest(unittest.TestCase):
 
 
 class CompileSqlEarlyValidationAggregationMetricTest(unittest.TestCase):
-    """Gate 1: SUM/AVG are only defined for the numeric measure metrics.
+    """Gate 1: non-sensible aggregation/metric combinations are rejected.
 
-    Rejection now happens in two layers. ``QueryIntent.metric`` is a
+    Rejection happens in two layers. ``QueryIntent.metric`` is a
     ``Literal`` restricted to the canonical metric names (``revenue``,
     ``quantity``, ``unit_price``, ``customer_id``), so a text/dimension column
     such as ``country`` or ``description`` cannot even be expressed as a
     metric -- Pydantic raises a ``pydantic.ValidationError`` at construction,
     before ``compile_sql`` ever runs. Gate 1 in ``compile_sql`` is therefore
-    left with exactly the case the schema cannot express away: SUM/AVG over a
+    left with exactly the cases the schema cannot express away: SUM/AVG over a
     canonical metric that is nonetheless not a sensible measure -- a
     ``customer_id`` that is stored REAL yet is not sensible to sum or average
-    -- rejected as ``invalid_intent:aggregation_metric_mismatch``.
+    -- and MIN/MAX over that same opaque identifier (the lowest/highest
+    customer-id value is not a business answer). Both reject with
+    ``invalid_intent:aggregation_metric_mismatch``. COUNT over
+    ``customer_id`` -- plain and COUNT(DISTINCT ...) -- stays allowed.
     """
 
     REASON = "invalid_intent:aggregation_metric_mismatch"
@@ -2090,6 +2245,44 @@ class CompileSqlEarlyValidationAggregationMetricTest(unittest.TestCase):
         # exactly the "valid enum value yet not sensible to average" case that
         # is now Gate 1's remaining job.
         self._assert_rejected_by_compile_sql("avg", "customer_id")
+
+    def test_min_over_customer_id_is_rejected(self):
+        # MIN over customer_id mirrors the AVG rationale: the column is real
+        # and numeric, but the lowest customer-id value is not a sensible
+        # business aggregation over an opaque identifier.
+        self._assert_rejected_by_compile_sql("min", "customer_id")
+
+    def test_max_over_customer_id_is_rejected(self):
+        # MAX over customer_id, the sibling of MIN over it, is rejected for the
+        # same reason.
+        self._assert_rejected_by_compile_sql("max", "customer_id")
+
+    def test_count_over_customer_id_still_compiles(self):
+        # Positive control on the count boundary: COUNT(customer_id) counts
+        # customer rows and COUNT(DISTINCT customer_id) (intent.distinct=True)
+        # counts unique customers -- both meaningful, so the gate must never
+        # reject them while it rejects MIN/MAX over the identifier.
+        for distinct in (False, True):
+            with self.subTest(distinct=distinct):
+                state = _compile(
+                    aggregation="count", metric="customer_id", distinct=distinct
+                )
+                self.assertIsNone(state.error)
+                self.assertIsNotNone(state.sql_main)
+                self.assertEqual(state.sql_companions, {})
+
+    def test_min_max_over_numeric_measure_metrics_still_compiles(self):
+        # Positive control on the measure boundary: MIN/MAX over the numeric
+        # measures (revenue, quantity) must keep compiling -- the customer_id
+        # rejection must not spill over to metrics where extrema are real
+        # business answers.
+        for aggregation in ("min", "max"):
+            for metric in ("revenue", "quantity"):
+                with self.subTest(aggregation=aggregation, metric=metric):
+                    state = _compile(aggregation=aggregation, metric=metric)
+                    self.assertIsNone(state.error)
+                    self.assertIsNotNone(state.sql_main)
+                    self.assertEqual(state.sql_companions, {})
 
     def test_sum_over_amount_metrics_still_compiles(self):
         # Positive control on the measure boundary: SUM(revenue) (the proven
@@ -2179,7 +2372,7 @@ class CompileSqlEarlyValidationDateRangeTest(unittest.TestCase):
             state.sql_main,
             "SELECT SUM(quantity * unit_price) AS revenue FROM transactions "
             "WHERE invoice_timestamp >= '2010-01-01' "
-            "AND invoice_timestamp <= '2010-01-01'",
+            "AND invoice_timestamp <= '2010-01-01' LIMIT 1",
         )
         self.assertEqual(state.sql_companions, {})
 
