@@ -8,7 +8,7 @@ imports -- data shapes only.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -210,6 +210,71 @@ class Disclosure(BaseModel):
     detail: str
 
 
+class TextSegment(BaseModel):
+    """Literal-prose segment of an answer template.
+
+    Attributes:
+        type: Segment-kind discriminator; always ``"text"``.
+        content: Literal prose. After every ``ref`` segment in the template has
+            been substituted from the reference dictionary, ``content`` appears
+            in the final answer verbatim. Must never contain a digit: every
+            computed number is routed through a ``ref`` segment rather than
+            hard-coded into prose (enforced later by
+            ``graph.segment_validator.validate_segments``).
+    """
+
+    type: Literal["text"] = "text"
+    content: str
+
+
+class RefSegment(BaseModel):
+    """Substitution-hole segment of an answer template.
+
+    Attributes:
+        type: Segment-kind discriminator; always ``"ref"``.
+        key: A key into the flat ``dict[str, str]`` reference dictionary built
+            by ``graph.reference_dict.build_reference_dict`` (e.g.
+            ``result.total``, ``result.rows.0.country``, ``filters.country``,
+            ``display.top_n``). Rendering replaces the segment with that key's
+            pre-formatted value.
+    """
+
+    type: Literal["ref"] = "ref"
+    key: str
+
+
+# One answer-template item: a discriminated union on ``"type"``, so a segment
+# is always exactly one of the two shapes above and Pydantic rejects a segment
+# that carries the wrong or missing field for its declared kind.
+AnswerSegment = Annotated[
+    TextSegment | RefSegment, Field(discriminator="type")
+]
+
+
+class AnswerSegments(BaseModel):
+    """An answer template: an ordered list of typed ``text``/``ref`` segments.
+
+    This is the structured-output schema ``assemble_answer`` (Node 7) is
+    constrained to emit through its bound model
+    (``graph.llm.get_answer_model``). Each item is either a ``TextSegment``
+    (literal prose) or a ``RefSegment`` (a substitution hole into the reference
+    dictionary) -- the exact per-item shape the downstream deterministic gates
+    consume: a model-dumped valid instance is a list of
+    ``{"type": "text", "content": str}`` and ``{"type": "ref", "key": str}``
+    dicts, which is the segment contract
+    ``graph.segment_validator.validate_segments`` checks.
+
+    Defined as a single-field object rather than a bare list type because
+    DeepSeek's strict structured-output endpoint requires an object-valued
+    schema root; the array lives in ``segments``.
+
+    Attributes:
+        segments: The ordered answer-template segments.
+    """
+
+    segments: list[AnswerSegment]
+
+
 class GraphState(BaseModel):
     """Full working state passed between graph steps for one user query.
 
@@ -253,8 +318,20 @@ class GraphState(BaseModel):
             stores the empty list, like a scalar.
             ``None`` until execution produces the result.
         error: Error message if a step failed; ``None`` when all is well.
+        error_reasons: Machine-readable reasons accumulated while processing
+            this query, in the order they were produced. Empty by default.
+            ``error`` carries the single terminal reason the graph routes on;
+            ``error_reasons`` is a list so earlier reasons are not lost when a
+            retry or a later failure replaces ``error``. Each entry uses the
+            same exact machine-readable ``<prefix>:<detail>`` form nodes use on
+            ``error`` (e.g. ``intent_extraction_failed:<reason>``).
         disclosures: Explanations (rule firings, assumptions, direct filters)
             to surface to the user. Empty by default.
+        answer_generation_retried: Whether ``assemble_answer`` (Node 7) needed
+            its one retry attempt. Defaults to ``False``; set to ``True`` only
+            when a retry actually occurs (same convention as
+            ``intent_extraction_retried`` for Node 2), kept visible/inspectable
+            rather than silently smoothed over.
         final_answer: The final user-facing answer text; ``None`` until the
             answer has been assembled.
     """
@@ -272,6 +349,8 @@ class GraphState(BaseModel):
     main_truncated: bool = False
     main_results: list[dict] | dict | None = None
     error: str | None = None
+    error_reasons: list[str] = Field(default_factory=list)
     disclosures: list[Disclosure] = Field(default_factory=list)
+    answer_generation_retried: bool = False
     final_answer: str | None = None
 

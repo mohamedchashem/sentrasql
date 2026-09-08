@@ -1,21 +1,33 @@
-"""Configure and expose the DeepSeek chat model used for intent extraction.
+"""Configure and expose the DeepSeek chat models for the two LLM-backed nodes.
 
 This module is deliberately narrow: it owns the single responsibility of
-producing the *bound, ready-to-invoke* model object for the
-``extract_query_intent`` graph node. It does not contain the real system
-prompt, retry logic, or the post-parse normalization step -- those are separate
-tasks that will layer on top of what is proven here.
+producing the *bound, ready-to-invoke* structured-output chat-model objects
+the graph's LLM-backed nodes call (``extract_query_intent`` and
+``assemble_answer``). It contains no real system prompt, retry logic, or
+post-parse validation/normalization for either node -- those are separate
+modules that layer on top of what is proven here.
 
-The entry point is ``get_intent_model()``, which returns a configured
-``ChatDeepSeek`` instance bound to ``graph.state.QueryIntent`` via
-``with_structured_output(..., strict=True)``. Invoking the returned runnable
-yields a fully validated ``QueryIntent`` Pydantic instance -- never raw JSON
-that would need manual parsing.
+Two factory functions live here, and both share one base configuration
+(``deepseek-v4-pro`` at temperature 0 with thinking explicitly disabled, aimed
+at DeepSeek's strict JSON-schema ``/beta`` endpoint; see the factory docstrings
+for the rationale):
+
+* ``get_intent_model()`` returns a configured ``ChatDeepSeek`` instance bound
+  to ``graph.state.QueryIntent`` via
+  ``with_structured_output(..., strict=True)``. Invoking the returned runnable
+  yields a fully validated ``QueryIntent`` Pydantic instance -- never raw JSON
+  that would need manual parsing.
+* ``get_answer_model()`` returns the same configured model bound to
+  ``graph.state.AnswerSegments``: the typed segment-list schema
+  ``assemble_answer`` (Node 7) is constrained to emit. Its items -- literal
+  prose (``text``) and reference-dictionary substitution holes (``ref``) -- are
+  exactly the segment shape the downstream deterministic gates
+  (``graph.segment_validator``, rendering) consume.
 
 The ``__main__`` block is a minimal, throwaway wiring probe: it sends one
 trivial hardcoded query with a bare-bones inline prompt and prints the raw
-returned ``QueryIntent`` object and its field values, proving the wiring works
-end-to-end against the live API.
+returned ``QueryIntent`` object and its field values, proving the intent-model
+wiring works end-to-end against the live API.
 """
 
 from __future__ import annotations
@@ -29,7 +41,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langchain_deepseek import ChatDeepSeek
 
-from graph.state import QueryIntent
+from graph.state import AnswerSegments, QueryIntent
 
 # The project keeps secrets in a gitignored root ``.env`` file (see
 # ``.env.example`` for the canonical key list). Loading it at import time with
@@ -41,8 +53,9 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 # DeepSeek's strict structured-output (JSON-schema) endpoint. This is passed to
 # ``ChatDeepSeek`` explicitly instead of trusting ``langchain-deepseek``'s
-# automatic strict-mode re-route -- see ``get_intent_model()`` for why that
-# re-route is broken and must not be relied on.
+# automatic strict-mode re-route -- see the two factory docstrings below
+# (``get_intent_model()`` and ``get_answer_model()``) for why that re-route is
+# broken and must not be relied on.
 _DEEPSEEK_BETA_API_BASE = "https://api.deepseek.com/beta"
 
 
@@ -97,6 +110,43 @@ def get_intent_model() -> Runnable[LanguageModelInput, QueryIntent]:
         extra_body={"thinking": {"type": "disabled"}},
     )
     return model.with_structured_output(QueryIntent, strict=True)
+
+
+def get_answer_model() -> Runnable[LanguageModelInput, AnswerSegments]:
+    """Return a configured ChatDeepSeek bound to AnswerSegments in strict mode.
+
+    ``assemble_answer``'s (Node 7) counterpart to ``get_intent_model()``: the
+    model configuration is identical -- ``model="deepseek-v4-pro"`` at
+    ``temperature=0``, thinking explicitly disabled via
+    ``extra_body={"thinking": {"type": "disabled"}}``, the strict JSON-schema
+    ``/beta`` base URL, and the API key read from the ``DEEPSEEK_API_KEY``
+    environment variable. See ``get_intent_model()``'s docstring for the full
+    rationale, which applies verbatim: structured output is a
+    function-calling/tool-choice request, which DeepSeek rejects with HTTP 400
+    while thinking is enabled, and the beta base URL must be set up front
+    because ``langchain-deepseek``'s automatic strict-mode re-route is broken.
+
+    Binding: ``with_structured_output(AnswerSegments, strict=True)`` returns a
+    runnable whose invocations produce validated ``AnswerSegments`` instances.
+    The schema's items are a discriminated union on ``"type"`` -- ``"text"``
+    segments carry a ``content`` string, ``"ref"`` segments carry a
+    reference-dictionary ``key`` -- so Pydantic (the only real enforcement
+    layer for value-level constraints; DESIGN_LOG.md section 16) rejects any
+    segment that mixes or omits the fields of its declared kind before
+    downstream rendering logic ever sees it.
+
+    Returns:
+        A runnable chat model: same inputs as any LangChain chat model, outputs
+        a validated ``AnswerSegments`` instance.
+    """
+    model = ChatDeepSeek(
+        model="deepseek-v4-pro",
+        api_key=os.environ["DEEPSEEK_API_KEY"],
+        base_url=_DEEPSEEK_BETA_API_BASE,
+        temperature=0,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    return model.with_structured_output(AnswerSegments, strict=True)
 
 
 if __name__ == "__main__":
