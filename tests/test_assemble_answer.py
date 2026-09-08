@@ -732,5 +732,317 @@ class AssembleAnswerRenderErrorRetryTest(unittest.TestCase):
         )
 
 
+# Disclosures reused by the no-data tests: a fired-exclusion-rule disclosure
+# plus an assumption disclosure (the "how was the filter resolved" explanation
+# that keeps the disclosures section meaningful even when nothing matched).
+_NO_DATA_DISCLOSURES = [
+    Disclosure(
+        source="rule",
+        label="AVG_EXCLUDE_ZERO_PRICE",
+        detail=(
+            "0 rows were excluded from the result set under rule "
+            "AVG_EXCLUDE_ZERO_PRICE."
+        ),
+    ),
+    Disclosure(
+        source="assumption",
+        label="filters.date_range",
+        detail=(
+            'The phrase "last month" was interpreted as: resolved to '
+            "August 2026."
+        ),
+    ),
+]
+
+
+def _no_data_filters_state(
+    *,
+    group_by: list[str] | None = None,
+    country_value: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    disclosures: list[Disclosure] | None = None,
+) -> GraphState:
+    """A gate-passing, executed state whose main query matched zero rows.
+
+    ``main_results`` is the canonical empty list -- the shape every executed
+    query that matched no rows normalizes to, scalar and grouped alike.
+    Country and date-range boundaries are set only when the matching keyword
+    argument is given, so a test can exercise exactly the filter presence it
+    targets. The intent mirrors the real no-data scenario: an average over
+    unit_price inside a resolved date range.
+    """
+    return GraphState(
+        raw_query="A query that matched no rows in the database.",
+        query_intent=QueryIntent(
+            aggregation="avg",
+            metric="unit_price",
+            group_by=group_by or [],
+            filters=Filters(
+                country=CountryFilter(
+                    present=country_value is not None,
+                    value=country_value or "",
+                ),
+                date_range=DateRangeFilter(
+                    start_present=start is not None,
+                    start=start or "",
+                    end_present=end is not None,
+                    end=end or "",
+                ),
+            ),
+        ),
+        applicable_rules=[],
+        sql_main=None,
+        sql_total=None,
+        sql_companions={},
+        guardrail_status="passed",
+        main_truncated=False,
+        main_results=[],
+        error=None,
+        disclosures=disclosures if disclosures is not None else [],
+        final_answer=None,
+    )
+
+
+def _expected_no_data_answer(
+    intro: str, disclosures: list[Disclosure]
+) -> str:
+    """Compose the expected no-data final answer for the given disclosures.
+
+    Mirrors ``_render_disclosures`` + ``_join_sections``: the intro sentence
+    followed, only when disclosures exist, by a ``Disclosures`` heading and one
+    ``- detail`` bullet per disclosure.
+    """
+    if not disclosures:
+        return intro
+    lines = ["Disclosures"]
+    lines.extend(f"- {disclosure.detail}" for disclosure in disclosures)
+    return f"{intro}\n\n" + "\n".join(lines)
+
+
+class AssembleAnswerNoDataDeterministicTest(unittest.TestCase):
+    """Node 7 deterministic no-data path: ``main_results == []`` skips the LLM.
+
+    An executed main query that matched zero rows never reaches the model: the
+    node renders a deterministic, presence-driven no-data answer from the
+    reference dictionary's real filter values (with the disclosures section
+    still appended) and returns. No prompt is built, no model call happens,
+    ``answer_generation_retried`` stays ``False``, and ``error`` stays
+    ``None``; an exception in the deterministic message builder is a terminal
+    setup error with no retry.
+    """
+
+    def test_empty_scalar_with_filters_renders_exact_no_data_answer(self):
+        state = _no_data_filters_state(
+            country_value="United Kingdom",
+            start="2026-08-01T00:00:00",
+            end="2026-08-31T23:59:59",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        expected = _expected_no_data_answer(
+            "No data was found for United Kingdom in the period from "
+            "2026-08-01T00:00:00 through 2026-08-31T23:59:59.",
+            _NO_DATA_DISCLOSURES,
+        )
+        self.assertIsNone(result.error)
+        self.assertFalse(result.answer_generation_retried)
+        self.assertEqual(result.final_answer, expected)
+        # The LLM is never touched on the no-data path.
+        model_factory.assert_not_called()
+
+    def test_empty_grouped_result_skips_llm_and_renders_no_table(self):
+        state = _no_data_filters_state(
+            group_by=["country"],
+            country_value="United Kingdom",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(state.query_intent.group_by, ["country"])
+        expected = _expected_no_data_answer(
+            "No data was found for United Kingdom.",
+            _NO_DATA_DISCLOSURES,
+        )
+        self.assertIsNone(result.error)
+        self.assertFalse(result.answer_generation_retried)
+        self.assertEqual(result.final_answer, expected)
+        # A grouped zero-row result is the same canonical empty shape, so the
+        # deterministic path renders no row-data table -- and no delimiter.
+        self.assertNotIn(" | ", result.final_answer)
+        model_factory.assert_not_called()
+
+    def test_empty_result_with_country_only_omits_period_clause(self):
+        state = _no_data_filters_state(
+            country_value="United Kingdom",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(
+            result.final_answer,
+            _expected_no_data_answer(
+                "No data was found for United Kingdom.",
+                _NO_DATA_DISCLOSURES,
+            ),
+        )
+        model_factory.assert_not_called()
+
+    def test_empty_result_with_full_range_only_omits_country_clause(self):
+        state = _no_data_filters_state(
+            start="2026-08-01T00:00:00",
+            end="2026-08-31T23:59:59",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(
+            result.final_answer,
+            _expected_no_data_answer(
+                "No data was found in the period from "
+                "2026-08-01T00:00:00 through 2026-08-31T23:59:59.",
+                _NO_DATA_DISCLOSURES,
+            ),
+        )
+        model_factory.assert_not_called()
+
+    def test_empty_result_start_only_half_open_range(self):
+        state = _no_data_filters_state(
+            start="2026-01-01T00:00:00",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(
+            result.final_answer,
+            _expected_no_data_answer(
+                "No data was found from 2026-01-01T00:00:00 onward.",
+                _NO_DATA_DISCLOSURES,
+            ),
+        )
+        model_factory.assert_not_called()
+
+    def test_empty_result_end_only_half_open_range(self):
+        state = _no_data_filters_state(
+            end="2026-12-31T23:59:59",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertEqual(
+            result.final_answer,
+            _expected_no_data_answer(
+                "No data was found through 2026-12-31T23:59:59.",
+                _NO_DATA_DISCLOSURES,
+            ),
+        )
+        model_factory.assert_not_called()
+
+    def test_empty_result_no_filters_falls_back_to_generic_sentence(self):
+        state = _no_data_filters_state(disclosures=[])
+
+        with mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        self.assertIsNone(result.error)
+        self.assertFalse(result.answer_generation_retried)
+        self.assertEqual(
+            result.final_answer,
+            "No data was found for the requested query.",
+        )
+        model_factory.assert_not_called()
+
+    def test_message_builder_exception_is_terminal_setup_error_no_retry(self):
+        state = _no_data_filters_state(country_value="United Kingdom")
+
+        with mock.patch(
+            "graph.node_assemble_answer._render_no_data_answer",
+            side_effect=RuntimeError("no-data render exploded"),
+        ) as render_mock, mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        # The deterministic message builder ran and raised; the node caught it
+        # and converted it into the terminal setup-error reason -- no retry is
+        # possible or attempted (a retried model call cannot fix a
+        # deterministic message build failure), and the LLM is never reached.
+        render_mock.assert_called_once()
+        self.assertEqual(
+            result.error,
+            "answer_generation_failed:setup_error:RuntimeError",
+        )
+        self.assertEqual(result.error_reasons, [])
+        self.assertFalse(result.answer_generation_retried)
+        self.assertIsNone(result.final_answer)
+        model_factory.assert_not_called()
+
+    def test_non_empty_result_still_takes_normal_llm_path(self):
+        # Regression guard: the deterministic branch must only short-circuit
+        # when main_results == []; a populated result still builds a prompt and
+        # invokes the (mocked) model exactly once, exactly as before.
+        state = _answer_state()
+        fake_model = mock.Mock()
+        fake_model.invoke.return_value = _valid_answer_segments()
+
+        with _patched_answer_model(fake_model):
+            result = assemble_answer(state)
+
+        self.assertIsNone(result.error)
+        self.assertFalse(result.answer_generation_retried)
+        self.assertEqual(fake_model.invoke.call_count, 1)
+        self.assertEqual(result.final_answer, _expected_scalar_final_answer())
+
+    def test_empty_result_never_builds_an_answer_prompt(self):
+        state = _no_data_filters_state(
+            country_value="United Kingdom",
+            start="2026-08-01T00:00:00",
+            end="2026-08-31T23:59:59",
+            disclosures=_NO_DATA_DISCLOSURES,
+        )
+
+        with mock.patch(
+            "graph.node_assemble_answer.build_answer_prompt"
+        ) as prompt_mock, mock.patch(
+            "graph.node_assemble_answer.get_answer_model"
+        ) as model_factory:
+            result = assemble_answer(state)
+
+        # The restructure made prompt building a non-empty-path step: an empty
+        # result never builds an LLM prompt and never invokes the model.
+        prompt_mock.assert_not_called()
+        model_factory.assert_not_called()
+        self.assertIsNone(result.error)
+        self.assertFalse(result.answer_generation_retried)
+        self.assertIsNotNone(result.final_answer)
+
+
 if __name__ == "__main__":
     unittest.main()

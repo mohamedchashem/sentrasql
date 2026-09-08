@@ -13,7 +13,13 @@ renders the validated segments into ``state.final_answer``. The deterministic
 setup that builds those two pieces runs before the retry envelope: an
 exception there is a terminal ``answer_generation_failed:setup_error:<Class>``
 with no retry, because retrying the model call cannot fix a deterministic
-setup failure. Rendering is real
+setup failure. One case never reaches the LLM at all: an executed main
+query that matched zero rows (``state.main_results == []``). There is no
+result value for a model to phrase, so after the reference dictionary is
+built the node renders a fully deterministic, presence-driven no-data
+answer -- stating that no data was found, built from the real filter
+values the dictionary holds, disclosures still appended -- and returns
+without invoking ``get_answer_model``. Rendering is real
 deterministic code and therefore runs inside the attempt loop: an exception
 raised after validation passed is a failure reason like any other
 (``render_error:<ExceptionClassName>``) and is retried exactly once, because a
@@ -62,6 +68,15 @@ _ROW_DELIMITER = " | "
 # ``state.disclosures`` in every case, never generated or rephrased by the
 # model).
 _DISCLOSURES_HEADING = "Disclosures"
+
+# Reference-dictionary keys for the direct (non-rule) filter values the
+# deterministic no-data message may cite. Only keys actually present in the
+# dictionary are ever read -- presence is the source of truth, mirroring the
+# reference builder's ``*_present``-flag discipline -- so the no-data message
+# is built presence-driven and never assumes any filter exists.
+_FILTERS_COUNTRY_KEY = "filters.country"
+_FILTERS_DATE_RANGE_START_KEY = "filters.date_range.start"
+_FILTERS_DATE_RANGE_END_KEY = "filters.date_range.end"
 
 
 def _retry_prompt_context(retry_reasons: list[str]) -> str:
@@ -251,6 +266,89 @@ def _render_answer(
     return _join_sections(intro, table, disclosures)
 
 
+def _render_no_data_intro(references: dict[str, str]) -> str:
+    """Compose the deterministic no-data intro sentence from real filter refs.
+
+    Presence-driven by construction: every clause is built only from a
+    reference-dictionary key that is actually present, so the sentence never
+    assumes a country or a date-range boundary exists. With no filter keys at
+    all it falls back to a fully generic sentence. The static template text
+    contains no digits -- values such as ISO-8601 timestamps enter only
+    through the reference-dictionary values they are substituted from,
+    consistent with the project's no-digits-in-literal-text discipline.
+
+    Args:
+        references: The flat substitution dictionary built by
+            ``graph.reference_dict.build_reference_dict`` for this call. Only
+            the ``filters.country`` / ``filters.date_range.start`` /
+            ``filters.date_range.end`` keys are consulted; a key's presence
+            here mirrors its intent ``*_present`` flag.
+
+    Returns:
+        One sentence stating no data was found, e.g. ``No data was found for
+        United Kingdom in the period from 2026-08-01T00:00:00 through
+        2026-08-31T23:59:59.``, or the generic ``No data was found for the
+        requested query.`` when no filter key is present.
+    """
+    has_country = _FILTERS_COUNTRY_KEY in references
+    has_start = _FILTERS_DATE_RANGE_START_KEY in references
+    has_end = _FILTERS_DATE_RANGE_END_KEY in references
+
+    if not (has_country or has_start or has_end):
+        return "No data was found for the requested query."
+
+    clauses: list[str] = []
+    if has_country:
+        clauses.append(f"for {references[_FILTERS_COUNTRY_KEY]}")
+    if has_start and has_end:
+        clauses.append(
+            "in the period from "
+            f"{references[_FILTERS_DATE_RANGE_START_KEY]} through "
+            f"{references[_FILTERS_DATE_RANGE_END_KEY]}"
+        )
+    elif has_start:
+        clauses.append(
+            f"from {references[_FILTERS_DATE_RANGE_START_KEY]} onward"
+        )
+    elif has_end:
+        clauses.append(f"through {references[_FILTERS_DATE_RANGE_END_KEY]}")
+
+    return f"No data was found {' '.join(clauses)}."
+
+
+def _render_no_data_answer(state: GraphState, references: dict[str, str]) -> str:
+    """Compose the deterministic no-data final answer from state and refs.
+
+    Runs only for an executed main query that matched zero rows
+    (``state.main_results == []``), replacing the LLM intro entirely, with the
+    same section order as the normal render path:
+
+    1. Intro -- ``_render_no_data_intro``, the deterministic sentence stating
+       no data was found, built presence-driven from the real filter values
+       already in the reference dictionary.
+    2. Disclosures -- ``_render_disclosures`` appends ``state.disclosures``
+       verbatim, in existing order. They stay relevant precisely when no data
+       matched: an assumption disclosure such as "resolved 'last month' to
+       [range]" is often the explanation for why nothing matched.
+
+    The non-empty sections are joined into one string, exactly as
+    ``_render_answer`` joins them. Exceptions raised here are caught by the
+    caller and treated as a terminal setup failure
+    (``answer_generation_failed:setup_error:<Class>``) with no retry, because
+    a retried model call cannot fix a deterministic message build failure.
+
+    Args:
+        state: The gate-passing state; ``state.disclosures`` is rendered
+            verbatim as the answer's closing section.
+        references: The flat substitution dictionary built by
+            ``graph.reference_dict.build_reference_dict`` for this call.
+
+    Returns:
+        The deterministic no-data final answer as a single string.
+    """
+    intro = _render_no_data_intro(references)
+    disclosures = _render_disclosures(state.disclosures)
+    return _join_sections(intro, disclosures)
 def assemble_answer(state: GraphState) -> GraphState:
     """Node 7. Gate, LLM answer-segment generation, validation, retry, render.
 
@@ -268,15 +366,31 @@ def assemble_answer(state: GraphState) -> GraphState:
 
     Setup (gate passed): builds the flat reference dictionary by genuinely
     calling ``build_reference_dict(state.main_results, state.query_intent)``
-    with this state's real data, then builds this call's prompt from that
-    actual dictionary via ``build_answer_prompt``. Both steps are deterministic
-    and run before the retry envelope: any exception they raise (an unexpected
-    result shape, a lookup that misses, a prompt-build failure) is a terminal
+    with this state's real data; an exception there is a terminal
     ``answer_generation_failed:setup_error:<ExceptionClassName>`` with no retry
     -- never a crash and never a wasted retry of the LLM call.
 
-    Generation, validation, and rendering: invokes the strict structured-output
-    model (``get_answer_model``) with a SystemMessage built from that prompt
+    No-data short-circuit: an executed main query that matched zero rows
+    (``state.main_results == []`` -- the canonical empty shape for both scalar
+    and grouped queries) never reaches the LLM. Once the reference dictionary
+    is built, the node renders ``_render_no_data_answer`` instead: a fully
+    deterministic, presence-driven sentence stating that no data was found,
+    composed from whichever real filter values (country / date-range
+    boundaries) the dictionary holds -- falling back to a generic sentence
+    when no filter is present at all -- with ``state.disclosures`` still
+    appended verbatim (an assumption disclosure such as how "last month" was
+    resolved is often the explanation for the empty result). The prompt, the
+    model call, and the retry envelope are all skipped: ``error`` stays
+    ``None`` and ``answer_generation_retried`` stays ``False``. An exception
+    in the deterministic message builder is the same terminal
+    ``answer_generation_failed:setup_error:<ExceptionClassName>`` with no
+    retry, because a retried model call cannot fix a deterministic message
+    build failure.
+
+    Generation, validation, and rendering (non-empty results only): the node
+    first builds this call's prompt from the actual dictionary via
+    ``build_answer_prompt``, then invokes the strict structured-output model
+    (``get_answer_model``) with a SystemMessage built from that prompt
     and runs the emitted ``AnswerSegments`` through
     ``validate_segments(segments, references)``. On success the validated
     segment list is rendered into ``state.final_answer`` by ``_render_answer``
@@ -322,16 +436,49 @@ def assemble_answer(state: GraphState) -> GraphState:
     ):
         return state
 
-    # --- Setup only: no LLM invocation, no rendering, no retry yet. ---
-    # The reference-dictionary build and prompt construction are deterministic
-    # local work that precedes the retry envelope: an exception here (an
-    # unexpected result shape, a lookup that misses, a prompt build failure)
-    # is a terminal setup failure -- retrying the model call cannot fix a
-    # deterministic setup failure -- so it is caught and recorded as
+    # --- Deterministic setup, part 1: the reference dictionary. Built first,
+    # and alone, because both the empty-result branch below and the non-empty
+    # path's prompt need it, while the prompt itself exists only for the
+    # non-empty (LLM) path. An exception here is a terminal setup failure --
+    # retrying the model call cannot fix a deterministic setup failure -- so
+    # it is caught and recorded as
     # ``answer_generation_failed:setup_error:<ExceptionClass>`` with no retry,
     # never allowed to escape and crash the graph.
     try:
         references = build_reference_dict(state.main_results, state.query_intent)
+    except Exception as exc:
+        state.error = (
+            f"{_ANSWER_GENERATION_FAILED_PREFIX}:{_SETUP_ERROR_PREFIX}:"
+            f"{type(exc).__name__}"
+        )
+        return state
+
+    # --- Deterministic no-data path: a main query that executed and matched
+    # zero rows (state.main_results == [], the canonical empty shape for both
+    # scalar and grouped queries) has no result value to report. The LLM would
+    # add nothing but nondeterministic prose over a single boolean fact, so
+    # the answer is composed deterministically -- a presence-driven no-data
+    # sentence built from the real filter values in ``references``, plus the
+    # disclosures section -- and the model is never invoked: no attempt, no
+    # retry, ``answer_generation_retried`` stays ``False`` and ``error`` stays
+    # ``None``. An exception in the deterministic message builder is itself a
+    # deterministic failure a retried model call could not fix, so it becomes
+    # the same terminal setup-error as above, with no retry.
+    if state.main_results == []:
+        try:
+            state.final_answer = _render_no_data_answer(state, references)
+        except Exception as exc:
+            state.error = (
+                f"{_ANSWER_GENERATION_FAILED_PREFIX}:{_SETUP_ERROR_PREFIX}:"
+                f"{type(exc).__name__}"
+            )
+            return state
+        return state
+
+    # --- Deterministic setup, part 2: the per-call answer prompt, built only
+    # for the non-empty (LLM) path. Same deterministic-failure handling as the
+    # reference-dictionary build above.
+    try:
         prompt = build_answer_prompt(references)
     except Exception as exc:
         state.error = (
