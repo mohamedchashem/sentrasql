@@ -170,6 +170,7 @@ elif clicked_sample is not None:
 if question_to_run is not None:
     with st.spinner(_RUNNING_COPY):
         result = ask(question_to_run)
+        st.write(f"DEBUG raw result: {result}")
     # Grow, never replace: each submitted question appends its own outcome, so
     # earlier exchanges stay in the session and are re-rendered on the rerun.
     history.append((question_to_run, result))
