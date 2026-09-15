@@ -6,14 +6,7 @@ SentraSQL is a natural-language analytics agent. You type a question about a rea
 
 **🔗 Live demo:** [sentrasql.streamlit.app](https://sentrasql.streamlit.app) — no setup required, just click and ask a question.
 
-<!-- 📸 SCREENSHOT / GIF PLACEHOLDER
-     Add a screenshot of the welcome screen + a screenshot of a real answer
-     with disclosures, OR a short (15-20s) screen recording of yourself
-     asking a question and getting a real answer, converted to a GIF.
-     Drop the image/GIF file into this repo (e.g. in a /docs or /assets
-     folder) and reference it here, like:
-     ![SentraSQL demo](docs/demo.gif)
--->
+![SentraSQL demo](assets/SentraSQL.gif)
 
 ---
 
