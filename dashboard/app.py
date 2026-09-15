@@ -52,6 +52,12 @@ import os
 
 if "DEEPSEEK_API_KEY" in st.secrets:
     os.environ["DEEPSEEK_API_KEY"] = st.secrets["DEEPSEEK_API_KEY"]
+
+st.write(f"DEBUG: key found in st.secrets = {'DEEPSEEK_API_KEY' in st.secrets}")
+st.write(f"DEBUG: key found in os.environ = {'DEEPSEEK_API_KEY' in os.environ}")
+if "DEEPSEEK_API_KEY" in os.environ:
+    key = os.environ["DEEPSEEK_API_KEY"]
+    st.write(f"DEBUG: key starts with = {key[:6]}, length = {len(key)}")
     
 from dashboard import styling  # noqa: E402
 from dashboard.components import (  # noqa: E402
