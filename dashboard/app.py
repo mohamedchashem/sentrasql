@@ -39,9 +39,7 @@ from __future__ import annotations
 import html
 import sys
 from pathlib import Path
-import streamlit as st  # noqa: E402
-if "debug_last_result" in st.session_state:
-    st.write(f"DEBUG raw result: {st.session_state['debug_last_result']}")
+
 # Make the project root importable no matter how streamlit was launched, so the
 # ``dashboard`` package and its ``graph.*`` imports resolve. Mirrors the sys.path
 # handling scripts/run_load.py uses for the same reason.
@@ -49,7 +47,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-
+import streamlit as st  # noqa: E402
 
 from dashboard import styling  # noqa: E402
 from dashboard.components import (  # noqa: E402
@@ -172,7 +170,6 @@ elif clicked_sample is not None:
 if question_to_run is not None:
     with st.spinner(_RUNNING_COPY):
         result = ask(question_to_run)
-        st.session_state["debug_last_result"] = str(result)
     # Grow, never replace: each submitted question appends its own outcome, so
     # earlier exchanges stay in the session and are re-rendered on the rerun.
     history.append((question_to_run, result))
