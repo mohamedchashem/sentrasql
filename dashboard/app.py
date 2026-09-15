@@ -48,16 +48,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import streamlit as st  # noqa: E402
-import os
-
-if "DEEPSEEK_API_KEY" in st.secrets:
-    os.environ["DEEPSEEK_API_KEY"] = st.secrets["DEEPSEEK_API_KEY"]
-
-st.write(f"DEBUG: key found in st.secrets = {'DEEPSEEK_API_KEY' in st.secrets}")
-st.write(f"DEBUG: key found in os.environ = {'DEEPSEEK_API_KEY' in os.environ}")
-if "DEEPSEEK_API_KEY" in os.environ:
-    key = os.environ["DEEPSEEK_API_KEY"]
-    st.write(f"DEBUG: key starts with = {key[:6]}, length = {len(key)}")
 
 from dashboard import styling  # noqa: E402
 from dashboard.components import (  # noqa: E402
@@ -180,7 +170,6 @@ elif clicked_sample is not None:
 if question_to_run is not None:
     with st.spinner(_RUNNING_COPY):
         result = ask(question_to_run)
-        st.write(f"DEBUG raw result: {result}")
     # Grow, never replace: each submitted question appends its own outcome, so
     # earlier exchanges stay in the session and are re-rendered on the rerun.
     history.append((question_to_run, result))
