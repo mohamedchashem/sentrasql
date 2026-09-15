@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="64" viewBox="0 0 220 64" fill="none">
+  <defs>
+    <linearGradient id="mark" x1="8" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#39C8FF"/>
+      <stop offset="0.48" stop-color="#5865FF"/>
+      <stop offset="1" stop-color="#8B3DFF"/>
+    </linearGradient>
+    <linearGradient id="text" x1="83" y1="20" x2="178" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4E5BFF"/>
+      <stop offset="1" stop-color="#7C3FFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- SentraSQL mark -->
+  <path d="M31 6L54 19.5L45.5 24.5L31 16L16.5 24.5L8 19.5L31 6Z" fill="url(#mark)"/>
+  <path d="M8 19.5V38L16.5 43V24.5L31 16L45.5 24.5V43L54 38V19.5L31 6L8 19.5Z" fill="url(#mark)" opacity=".88"/>
+  <path d="M31 24L45.5 32.5V42L31 50.5L16.5 42V32.5L31 24Z" fill="url(#mark)" opacity=".95"/>
+  <path d="M31 50.5L54 37V46.5L31 60L8 46.5V37L31 50.5Z" fill="url(#mark)"/>
+
+  <!-- Wordmark -->
+  <text x="68" y="41" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="700" letter-spacing="-0.7">
+    <tspan fill="#F4F7FF">Sentra</tspan><tspan fill="url(#text)">SQL</tspan>
+  </text>
+</svg>

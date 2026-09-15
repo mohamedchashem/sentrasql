@@ -15,7 +15,7 @@ Contract: ``normalize_and_validate_intent(intent)`` returns
 ``(normalized_intent, None)`` on success and ``(original_intent, reason)`` on
 a hard failure, where ``reason`` follows the project's existing
 ``<category>:<detail>`` convention (as used by ``invalid_intent:...`` in
-``graph.nodes`` and the guardrail reason codes). The input object is never
+``graph.node_compile_sql`` and the guardrail reason codes). The input object is never
 mutated: a normalized intent is a copy, and a failed intent is returned
 untouched.
 

@@ -17,4 +17,5 @@ at the bottom only; existing content above is never edited or deleted).
 - [schema.md](docs/build/schema.md) — SQLite database schema (`db/schema.sql`) with PRAGMA and CHECK-constraint verification.
 - [data_pipeline.md](docs/build/data_pipeline.md) — data transformation, loading, and country-to-timezone mapping layers.
 - [graph.md](docs/build/graph.md) — LangGraph data models, node functions, and graph wiring.
+- [dashboard_ui.md](docs/build/dashboard_ui.md) — Streamlit dashboard UI layer: design system, landing-page composition, and responsive layout.
 - [commits.md](docs/build/commits.md) — full commit history (`git log --oneline`).

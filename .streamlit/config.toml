@@ -1,0 +1,39 @@
+# SentraSQL dashboard -- forced-light brand theme + minimal default chrome.
+#
+# Theme tokens pin the exact palette the design system uses (the hex values are
+# owned by dashboard/styling.py, which documents each role) so the app renders
+# consistently regardless of the viewer's OS/browser color preference and so
+# Streamlit's own widget chrome matches the custom surfaces. ``font`` loads
+# Inter (the single primary sans-serif of the design system) with a system
+# fallback stack; ``base = "light"`` opts out of dark mode;
+# ``client.toolbarMode = "minimal"`` and ``ui.hideTopBar`` remove the Streamlit
+# Deploy button and options menu (the leftover DOM is also hidden in
+# dashboard/styling.py -- except on small screens, where that strip carries the
+# only sidebar toggle). The sidebar section keeps the framework's own sidebar
+# surface/gutter consistent with the dark navy panel styling.py paints.
+
+[theme]
+base = "light"
+primaryColor = "#4F6BFF"
+backgroundColor = "#F8FAFF"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#14213D"
+borderColor = "#DCE2F2"
+linkColor = "#4F6BFF"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"
+
+[theme.sidebar]
+backgroundColor = "#08142F"
+secondaryBackgroundColor = "#101C3A"
+textColor = "#F4F7FF"
+borderColor = "#1E2B4D"
+primaryColor = "#4F6BFF"
+
+[client]
+toolbarMode = "minimal"
+
+[ui]
+hideTopBar = true
+
+[browser]
+gatherUsageStats = false

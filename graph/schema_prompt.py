@@ -21,8 +21,10 @@ consequences are load-bearing here, not polish:
   iteration order.
 
 Live-introspection contract (never a hardcoded duplicate of the schema, per the
-pattern used everywhere else in this project -- e.g. ``graph.nodes._live_schema``
-/ ``_live_transactions_columns`` and the ``compile_sql`` no-matching-data gate):
+pattern used everywhere else in this project -- e.g.
+``graph.node_validate_guardrails._live_schema`` /
+``graph.node_compile_sql._live_transactions_columns`` and the ``compile_sql``
+no-matching-data gate):
 
 * Table names are read from ``sqlite_master`` over a read-only connection
   (``db.connect.connect_readonly``); internal ``sqlite_%`` tables are skipped.
@@ -64,7 +66,7 @@ from sqlglot import exp, parse_one
 from db.connect import connect_readonly
 
 # Default live database path, derived exactly like the rest of the repository
-# (e.g. ``graph.nodes`` / ``scripts/run_load.py``): project root / data /
+# (e.g. ``graph.node_shared`` / ``scripts/run_load.py``): project root / data /
 # processed / sentrasql.db. Callers may override via ``build_schema_block``'s
 # ``db_path`` argument.
 _DEFAULT_DB_PATH = (
