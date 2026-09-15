@@ -48,7 +48,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import streamlit as st  # noqa: E402
+import os
 
+if "DEEPSEEK_API_KEY" in st.secrets:
+    os.environ["DEEPSEEK_API_KEY"] = st.secrets["DEEPSEEK_API_KEY"]
+    
 from dashboard import styling  # noqa: E402
 from dashboard.components import (  # noqa: E402
     answer_display,
