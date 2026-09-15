@@ -486,3 +486,14 @@ The first genuine end-to-end run of the compiled graph (all eight nodes, real De
 4. **Misleading truncation disclosure on guaranteed-single-row queries.** The guardrail's row-limit enforcement flagged `truncated=True` for any query it added a LIMIT to, including scalar aggregates, grouped totals, and COUNT(*) companions that can never return more than one row. Fixed at the root: `compile_sql` now attaches `LIMIT 1` to every provably single-row statement at compile time, so the guardrail's existing "already below ceiling" logic correctly leaves them unchanged and reports `truncated=False`. Grouped main queries (the only genuinely multi-row case) are unaffected and retain real truncation semantics.
 
 232 tests total. All four fixes were live-verified against the real DeepSeek API and/or real database where the original bugs were only reachable that way — each includes a new test category (schema-transmission inspection, live NULL-aggregate behavior, graph-topology invocation, end-to-end guardrail pass-through) that would have caught its respective bug without needing a live API call, closing the actual gap in test coverage that let all four ship undetected through 204 passing mocked tests.
+
+
+## No-Data Deterministic Answer Path — Complete
+
+Fixed a real-world clarity gap found during live-query testing: a query matching zero rows (e.g. a date filter resolving outside the dataset's actual range) previously produced an answer describing the query's filters without ever explicitly stating that no data was found — technically accurate but misleading by omission.
+
+**Fix:** `assemble_answer` now detects `state.main_results == []` immediately after the reference dictionary is built, and — before the LLM is ever invoked — renders a fully deterministic, presence-driven "no data found" message directly from the reference dictionary's filter keys (country, date-range start/end), falling back to a fully generic message when no filters are present at all. Disclosures are still appended unconditionally, since a disclosure (e.g. how a relative date phrase like "last month" was resolved) can be the actual explanation for why nothing matched.
+
+This was chosen over keeping the LLM in the loop with a "must state no data" instruction, per this project's consistent precedent: prose the model can get wrong is replaced with a structurally-guaranteed-correct path wherever the underlying fact is fully known in advance, rather than relying on instructed-and-verified compliance (the same reasoning behind the disclosure templating architecture itself). No LLM call, no retry envelope entered, `answer_generation_retried` stays `False` on this path — an exception in the deterministic message builder itself routes to the existing terminal `setup_error` pattern.
+
+242 tests total. Live-verified against the real DeepSeek API and real database in the milestone re-run that originally surfaced this gap.
