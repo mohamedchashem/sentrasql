@@ -102,7 +102,7 @@ def ask(question: str) -> QueryResult:
     try:
         raw = sentrasql_graph.invoke(GraphState(raw_query=cleaned))
     except Exception as exc:  # noqa: BLE001 -- ask() is the total boundary.
-        return QueryResult(error=_friendly_message_for(exc))
+        return QueryResult(error=f"{_friendly_message_for(exc)} [DEBUG: {type(exc).__name__}: {exc}]")
 
     # LangGraph returns the final state either as the typed GraphState or as a
     # plain dict of its fields depending on version/config; normalize both to
