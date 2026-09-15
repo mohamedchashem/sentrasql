@@ -14,9 +14,9 @@ text and shows the send glyph instead.
 
 The module exposes one render function that draws the piece and returns
 ``(question, submitted)`` -- the raw typed text and whether the send button was
-pressed on this run -- so ``app.py`` owns only the wiring (spinner, graph call,
-result display) and never the widget markup. No graph logic lives here:
-pressing send is this component's only job.
+pressed on this run -- so ``app.py`` owns only the wiring (the exchange's
+processing state, the graph call, result display) and never the widget markup.
+No graph logic lives here: pressing send is this component's only job.
 """
 
 from __future__ import annotations

@@ -31,6 +31,20 @@ legacy duplicate "What can I ask about?" expander was removed from the landing
 page; clicking a sample runs that exact question through the same
 ask-and-append path and the welcome disappears once any conversation exists
 (and only returns when New Chat empties the history again).
+
+The conversation-rendering suite (``DashboardConversationRenderingTest``) covers
+the landing-to-transcript architecture itself: the empty conversation IS the
+landing page, the first submitted question replaces it, the exchanges share one
+conversation area that always renders above the composer, and the in-flight
+exchange -- question bubble plus processing surface -- is drawn into that same
+area while the graph is still working. That last case needs the run to be read
+mid-flight, so it patches ``ask`` with a stub that raises: AppTest keeps the
+element tree of everything rendered before the abort, which is exactly the page
+a user sees during those several seconds.
+
+``DashboardProcessingStateTest`` asserts the processing component's markup
+contract on its own (it is only on screen while a run is in flight) plus the
+rules the shared stylesheet must carry for it.
 """
 
 import unittest
@@ -38,6 +52,8 @@ from unittest import mock
 
 from streamlit.testing.v1 import AppTest
 
+from dashboard import styling
+from dashboard.components import processing_state
 from dashboard.graph_client import QueryResult
 from graph.state import GraphState
 
@@ -54,6 +70,13 @@ _HISTORY_KEY = "sentrasql_chat_history"
 
 # Exact copy dashboard/app.py shows when Ask is pressed with an empty box.
 _EMPTY_SUBMIT_WARNING = "Please type a question before pressing Ask."
+
+# Marker message for the aborting ``ask`` stand-in used to inspect the page
+# while a question is still being processed (see the conversation-rendering
+# suite): it raises instead of returning, so AppTest keeps everything the app
+# had already rendered -- the pending question and the processing surface --
+# and stops there.
+_ABORT_MESSAGE = "aborted mid-run so the in-flight page can be read"
 
 # Mirrors of dashboard/components/sidebar.py's button key, stage names, and
 # idle marker, so the sidebar tests verify the component's real content.
@@ -123,6 +146,31 @@ def _ask_stub(question: str) -> QueryResult:
     )
     return QueryResult(
         state=GraphState(raw_query=cleaned, final_answer=final_answer)
+    )
+
+
+def _page_stream(at: AppTest):
+    """Main-area nodes in render order, with the injected stylesheet removed.
+
+    The stylesheet is itself a markdown element, rendered first, and its CSS
+    comments quote page copy -- so order and copy assertions read the page's
+    real content instead (``at.main`` already excludes the sidebar, which
+    would otherwise contribute the brand logo and tagline).
+    """
+    return [
+        node
+        for node in at.main
+        if not (
+            node.type == "markdown"
+            and node.value.lstrip().startswith("<style>")
+        )
+    ]
+
+
+def _page_text(at: AppTest) -> str:
+    """Rendered page text: every main-area markdown body but the stylesheet."""
+    return "".join(
+        node.value for node in _page_stream(at) if node.type == "markdown"
     )
 
 
@@ -478,6 +526,216 @@ class DashboardWelcomeScreenTest(DashboardAppTestBase):
             self.assertNotIn(gone, rendered)
         self.assertIn(_SAMPLE_AGGREGATE, rendered)
         self.assertIn(_SAMPLE_ANSWERS[0], rendered)
+
+
+class _RunAborted(Exception):
+    """Raised by the aborting ``ask`` stand-in (see ``_ABORT_MESSAGE``)."""
+
+
+class DashboardConversationRenderingTest(DashboardAppTestBase):
+    """Landing -> transcript transition and the in-flight exchange's placement.
+
+    The empty conversation IS the landing page, and the moment an exchange
+    exists the transcript takes over -- one conversation area, above the
+    composer. The exchange currently being processed (question bubble plus
+    processing surface) is drawn into that same area, so the wait is visible
+    where the answer will land instead of below the composer.
+    """
+
+    def _abort_run(self, question: str) -> QueryResult:
+        """Stand-in ``ask`` that stops the run so the in-flight page can be read.
+
+        AppTest keeps the element tree of everything the app had already
+        rendered when the run aborts, which is exactly the page a user sees
+        during those several seconds: the pending question and the processing
+        surface, already on screen, still waiting for this call.
+        """
+        raise _RunAborted(_ABORT_MESSAGE)
+
+    def _in_flight_page(self, at: AppTest) -> None:
+        """Submit ``_QUESTION_ONE`` and stop the run inside ``ask``."""
+        at.text_input(key="question_input").set_value(_QUESTION_ONE)
+        with mock.patch("dashboard.graph_client.ask", new=self._abort_run):
+            at.button(key="ask_button").click().run()
+        self.assertEqual(len(at.exception), 1)
+        self.assertEqual(at.exception[0].value, _ABORT_MESSAGE)
+
+    def test_first_typed_question_replaces_the_landing_page(self):
+        at = self._start_session()
+        self.assertIn(_WELCOME_HEADING, self._rendered_text(at))
+
+        self._submit_question(at, _QUESTION_ONE)
+
+        # The empty state is gone -- hero, description, capability card -- and
+        # the exchange reads as a chat instead.
+        rendered = _page_text(at)
+        self.assertNotIn(_WELCOME_HEADING, rendered)
+        self.assertNotIn(_WELCOME_TAGLINE, rendered)
+        self.assertNotIn("What can you ask?", rendered)
+        self.assertIn(_QUESTION_ONE, rendered)
+        self.assertIn(_ANSWER_ONE, rendered)
+        # ...and the three sample cards went with it: Ask is the only button.
+        self.assertEqual([b.label for b in at.main.button], ["Ask"])
+
+    def test_landing_page_is_replaced_on_the_same_run_as_the_submission(self):
+        at = self._start_session()
+        self._in_flight_page(at)
+
+        # While the question is being processed the page already holds the
+        # question and the processing surface -- never the landing page, and
+        # never a stale answer.
+        rendered = _page_text(at)
+        self.assertIn(_QUESTION_ONE, rendered)
+        self.assertIn("Analyzing your question...", rendered)
+        self.assertIn("sentrasql-processing", rendered)
+        self.assertNotIn(_WELCOME_HEADING, rendered)
+        self.assertNotIn(_WELCOME_TAGLINE, rendered)
+        self.assertNotIn(_ANSWER_ONE, rendered)
+        # Nothing is appended to the conversation while the run is in flight.
+        self.assertEqual(at.session_state[_HISTORY_KEY], [])
+
+    def test_processing_state_renders_above_the_composer(self):
+        at = self._start_session()
+        self._in_flight_page(at)
+
+        # In the main area's own render order: the pending question first, its
+        # processing surface directly under it, and only then the composer's
+        # input and Ask button -- so the wait is never hidden below the
+        # composer, where the user would have to scroll to discover it.
+        stream = _page_stream(at)
+        question_index = next(
+            i
+            for i, node in enumerate(stream)
+            if node.type == "markdown" and _QUESTION_ONE in node.value
+        )
+        processing_index = next(
+            i
+            for i, node in enumerate(stream)
+            if node.type == "markdown"
+            and "sentrasql-processing__indicator" in node.value
+        )
+        input_index = next(
+            i for i, node in enumerate(stream) if node.type == "text_input"
+        )
+        ask_index = next(
+            i
+            for i, node in enumerate(stream)
+            if node.type == "button" and node.label == "Ask"
+        )
+
+        self.assertLess(question_index, processing_index)
+        self.assertLess(processing_index, input_index)
+        self.assertLess(input_index, ask_index)
+
+    def test_each_further_question_appends_to_the_same_conversation(self):
+        at = self._start_session()
+        self._submit_question(at, _QUESTION_ONE)
+        self._submit_question(at, _QUESTION_TWO)
+        # A third question behaves exactly like the previous two: it appends.
+        self._submit_question(at, _SAMPLE_RULE)
+
+        # One conversation area holding all three exchanges, oldest first: no
+        # second transcript surface, no leftover landing container, and every
+        # question and answer rendered exactly once.
+        conversations = at.main.container
+        self.assertEqual(len(conversations), 1)
+        conversation = conversations[0]
+        conversation_text = "".join(m.value for m in conversation.markdown)
+        exchanges = (
+            _QUESTION_ONE,
+            _ANSWER_ONE,
+            _QUESTION_TWO,
+            _ANSWER_TWO,
+            _SAMPLE_RULE,
+            _SAMPLE_ANSWERS[1],
+        )
+        for expected in exchanges:
+            self.assertEqual(conversation_text.count(expected), 1)
+        positions = [conversation_text.index(text) for text in exchanges]
+        self.assertEqual(positions, sorted(positions))
+
+        # The landing page never came back, and its three sample cards are gone
+        # for good: Ask is the only button on the page by now.
+        self.assertNotIn(_WELCOME_HEADING, conversation_text)
+        self.assertNotIn(_WELCOME_TAGLINE, conversation_text)
+        self.assertEqual([b.label for b in at.main.button], ["Ask"])
+        self.assertEqual(len(at.session_state[_HISTORY_KEY]), 3)
+
+        # ...and that area renders before the composer it must never cover.
+        stream = list(at.main)
+        self.assertLess(
+            stream.index(conversation),
+            stream.index(at.main.text_input(key="question_input")),
+        )
+
+
+class DashboardProcessingStateTest(unittest.TestCase):
+    """The in-transcript processing surface: markup contract and its styling.
+
+    It is only ever on screen while ``ask`` is running, so its markup is
+    asserted on the component directly (the mid-run page itself is covered by
+    ``DashboardConversationRenderingTest``).
+    """
+
+    def _captured_markup(self) -> str:
+        """Render the component once and return the HTML block it emitted."""
+        captured: dict[str, object] = {}
+        with mock.patch.object(
+            processing_state.st,
+            "markdown",
+            lambda body, **kwargs: captured.update(body=body, kwargs=kwargs),
+        ):
+            processing_state.render_processing_state()
+        self.assertTrue(captured["kwargs"]["unsafe_allow_html"])
+        return str(captured["body"])
+
+    def test_component_emits_the_processing_surface_markup(self):
+        markup = self._captured_markup()
+
+        # One labeled surface: the SentraSQL speaker, the live status, and the
+        # supporting line naming the real work.
+        self.assertIn('class="sentrasql-processing"', markup)
+        self.assertIn('role="status"', markup)
+        self.assertIn("SentraSQL", markup)
+        self.assertIn("Analyzing your question...", markup)
+        self.assertIn(
+            "Understanding your request, generating SQL, and querying your "
+            "data...",
+            markup,
+        )
+        # The indicator is decorative: the status line carries the meaning.
+        self.assertIn('class="sentrasql-processing__indicator"', markup)
+        self.assertIn('aria-hidden="true"', markup)
+
+        # No question-bubble or composer markup (those belong elsewhere), and
+        # none of the things the surface must never grow: a user avatar, a
+        # timestamp, or a username.
+        self.assertNotIn("sentrasql-question", markup)
+        self.assertNotIn("sentrasql-composer", markup)
+        for forbidden in ("avatar", "timestamp", "username"):
+            self.assertNotIn(forbidden, markup)
+
+    def test_processing_surface_rules_live_in_the_shared_stylesheet(self):
+        css = styling.PAGE_CSS
+
+        # The component emits classes only; the single stylesheet styles them.
+        for rule in (
+            ".sentrasql-processing {",
+            ".sentrasql-processing__label {",
+            ".sentrasql-processing__row {",
+            ".sentrasql-processing__indicator {",
+            ".sentrasql-processing__status {",
+            ".sentrasql-processing__detail {",
+            "@keyframes sentrasql-processing-spin",
+        ):
+            self.assertIn(rule, css)
+
+        # Subtle by construction: an 18px accent ring (never a large spinner)
+        # on the surface, which keeps the bottom margin an answer uses to clear
+        # the pinned composer band.
+        self.assertIn("width: 18px;", css)
+        self.assertIn(f"border-top-color: {styling.ACCENT_COLOR};", css)
+        self.assertIn("margin: 4px 0 40px;", css)
 
 
 if __name__ == "__main__":

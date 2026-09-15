@@ -1047,8 +1047,9 @@ html, body, #root, [data-testid="stAppViewContainer"] { background: @PAGE_BG; }
    the capability card itself. */
 
 /* ---------------------------------------------------------------------------
-   7. Chat transcript: user question bubbles + flat answers with an accent
-      eyebrow, and disclosures as a muted sub-section under a thin divider.
+   7. Chat transcript: user question bubbles, the in-transcript processing
+      surface shown while a question runs, flat answers with an accent eyebrow,
+      and disclosures as a muted sub-section under a thin divider.
    --------------------------------------------------------------------------- */
 
 /* User question: right-aligned rounded bubble, soft lavender fill, dark text. */
@@ -1064,6 +1065,70 @@ html, body, #root, [data-testid="stAppViewContainer"] { background: @PAGE_BG; }
     overflow-wrap: break-word;
     white-space: pre-wrap;
     box-shadow: 0 1px 1px rgba(16, 24, 40, 0.03);
+}
+
+/* In-flight exchange: the question is already in the transcript (bubble above),
+   so the wait is shown where its answer will land -- a lightweight white
+   response panel under the question, still ABOVE the pinned composer, never a
+   status message below it. Deliberately not a bubble and not a composer:
+   hairline border, soft shadow, 14px radius, and one small accent ring as the
+   only motion (no large spinner, no overlay, no blocking UI). It shares the
+   answer's bottom margin so the last line clears the pinned composer band the
+   same way an answer does. */
+.sentrasql-processing {
+    margin: 4px 0 40px;
+    padding: 14px 18px;
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid @BORDER;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(60, 80, 130, 0.06);
+}
+.sentrasql-processing__label {
+    margin: 0 0 8px;
+    font-family: @FONT;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.35;
+    color: @TEXT;
+}
+.sentrasql-processing__row { display: flex; align-items: flex-start; gap: 10px; }
+/* The indicator: an 18px ring in the brand accent on a hairline track, spinning
+   slowly. It is decorative (aria-hidden) -- the status line carries the
+   meaning -- and is the only animation this surface adds. */
+.sentrasql-processing__indicator {
+    box-sizing: border-box;
+    flex: 0 0 18px;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    border: 2px solid @BORDER;
+    border-top-color: @ACCENT;
+    border-radius: 50%;
+    animation: sentrasql-processing-spin 0.9s linear infinite;
+}
+.sentrasql-processing__text { min-width: 0; }
+.sentrasql-processing__status {
+    margin: 0;
+    font-family: @FONT;
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: @TEXT;
+}
+.sentrasql-processing__detail {
+    margin: 2px 0 0;
+    font-family: @FONT;
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: @TEXT_SECONDARY;
+}
+@keyframes sentrasql-processing-spin {
+    to { transform: rotate(360deg); }
+}
+/* A user who asked for reduced motion still gets the ring, just not the spin. */
+@media (prefers-reduced-motion: reduce) {
+    .sentrasql-processing__indicator { animation: none; }
 }
 
 /* Answer: flat, no bubble; eyebrow in accent, body clean text on the canvas.

@@ -236,3 +236,160 @@ proving the information survived the move.
 * Known limitation of this verification: no browser screenshot was available in
   this environment, so the composer was validated structurally (DOM nesting from
   the headless AppTest run plus stylesheet assertions) rather than by pixel.
+
+---
+
+## Dashboard UI Layer — Empty-State Architecture: Landing → Transcript Transition and the In-Transcript Processing State
+
+**Status:** Complete. **Date:** 2026-09-15.
+**Scope:** One focused UX/architecture fix — how the app moves from the empty
+landing experience into the chat experience, and where the "question is being
+processed" state is rendered. The sidebar, logo, tagline, New Chat semantics,
+hero, example cards, capability card, "View details", background, palette, font
+system, icon system, composer, composer input, send button, and the whole
+backend (graph, nodes, SQL, guardrails, execution, answer generation,
+`chat_history` semantics) are untouched.
+
+### The architecture (one conversation state, no state machine)
+
+There is exactly one conversation state: the session-persistent
+`(question, result)` history list (`sentrasql_chat_history`). The landing page
+is not a second application state — it is the empty state of that one
+conversation:
+
+* `history == []` → the landing page (`welcome_screen` + `capability_card`).
+* `history != []` → the transcript, walked oldest-first.
+* New Chat still just empties the list, so the landing page returns through the
+  same branch that renders it on a fresh session — no `go_to_landing` path.
+* The composer is rendered in both cases (one implementation, no duplicate).
+
+### The rendering-order fix (the actual bug)
+
+`st.spinner("Running your question through SentraSQL — this can take several
+seconds…")` was written **after** the composer in script order, so the only
+in-flight UI appeared *below* the sticky composer, where a user had to scroll to
+discover it. It also meant the landing page stayed on screen (hero, cards,
+capability card) above the freshly submitted question for the whole run.
+
+The fix is a structural re-order, not CSS:
+
+```python
+conversation = st.container()                        # (1) reserved, empty
+question, submitted = question_input.render_...()    # (2) composer = LAST element
+question_to_run = ...                                # (3) resolve this turn's question
+with conversation:                                   # (4) fill it: transcript | landing
+    ...                                              #     then the in-flight exchange
+if question_to_run is not None:
+    result = ask(question_to_run)                    # (5) run, with the wait on screen
+    history.append((question_to_run, result))
+    st.rerun()                                       #     finished exchange in place
+```
+
+Why a reserved container is required: the composer's own widgets are what report
+a submission, but the composer must stay the last element on the page. A
+container created before the composer and filled after it is the only Streamlit
+mechanism that satisfies both — and it is genuinely structural (the composer's
+sticky wrapper remains a direct child of the root vertical block, so
+`margin-top: auto` still pins the pill to the viewport bottom on short pages).
+
+Two verified Streamlit 1.63 facts drove the primitive choice and were checked
+against the installed frontend/Python source, not assumed:
+
+* `st.empty()` holds a single element — writing a second element to it replaces
+  the first — so it cannot hold a transcript. `st.container()` holds many and
+  accepts later writes, so it is the reserve primitive used here.
+* `st.container()` renders as a plain nested `[data-testid="stVerticalBlock"]`
+  (no `stLayoutWrapper` of its own), and every existing transcript/landing rule
+  is either class-based or descendant-scoped from `[data-testid="stMain"]`, so
+  no CSS selector had to change. The sheet's existing
+  `[data-testid="stMain"] [data-testid="stVerticalBlock"] { gap: 0 }` also keeps
+  the nested block flush exactly like the blocks around it.
+
+The landing page is drawn inside `st.empty()` + `.container()` **only** so a
+clicked sample-question card can clear it (`landing.empty()`) on the same run and
+be replaced by the first transcript entry; a typed submission never renders it in
+the first place (`question_to_run` is already known when the area is filled).
+
+### New component: `dashboard/components/processing_state.py`
+
+The wait is now part of the transcript: the submitted question is echoed with
+the existing shared bubble markup (`sentrasql-question-row` /
+`sentrasql-question`, unchanged) and the processing surface is rendered
+immediately beneath it, inside the conversation area — so both are above the
+composer and visible without scrolling on the landing→chat path.
+
+`render_processing_state()` emits one static `st.markdown` block (no widget, no
+state) with the SentraSQL label, a decorative 18px accent ring
+(`aria-hidden`), the live status line, and the supporting line naming the real
+work; the block is marked `role="status"` for assistive technology. No avatar,
+timestamp, username, or message number anywhere — in this component or in the
+question bubble. `app.py` no longer draws a spinner at all.
+
+### Stylesheet additions (section 7 only)
+
+`.sentrasql-processing` (white 0.88 panel, hairline `@BORDER`, 14px radius,
+`0 6px 24px rgba(60,80,130,0.06)`, `14px 18px` padding, `margin: 4px 0 40px` —
+the same bottom clearance an answer uses), `.sentrasql-processing__label`
+(`14px/1.35`, 700, `@TEXT`), `.sentrasql-processing__row` (flex, 10px gap),
+`.sentrasql-processing__indicator` (18px ring: `2px solid @BORDER` with
+`border-top-color: @ACCENT`, one 0.9s spin keyframe, disabled under
+`prefers-reduced-motion`), `.sentrasql-processing__status` (`15px/1.45`,
+400, `@TEXT`), `.sentrasql-processing__detail` (`12.5px/1.45`, 400,
+`@TEXT_SECONDARY`). No new colours, gradients, fonts, or icons were introduced;
+no dark surface, no overlay, no large spinner.
+
+### Files touched
+
+| File | Change |
+| --- | --- |
+| `dashboard/app.py` | Render order only: reserve the conversation container, render the composer, resolve the turn's question, fill the container (transcript \| landing \| in-flight exchange), then `ask` + append + rerun. Module docstring updated. `_RUNNING_COPY` (spinner copy) removed. |
+| `dashboard/components/processing_state.py` | **New.** The in-transcript processing surface (`render_processing_state()`), static markup only. |
+| `dashboard/styling.py` | Section 7 header comment + the seven additive `.sentrasql-processing*` rules / keyframes. Nothing else. |
+| `dashboard/components/question_input.py` | Docstring only (it still said `app.py` owns "spinner"). No behaviour change. |
+| `tests/test_dashboard_app.py` | +6 tests (see below) and two small content-only helpers that exclude the injected stylesheet from copy/order assertions. |
+| `dashboard/components/answer_display.py`, `welcome_screen.py`, `capability_card.py`, `sidebar.py`, `graph_client.py`, `graph/*`, `db/*` | Untouched. |
+
+### Tests added
+
+* `test_first_typed_question_replaces_the_landing_page` — hero, description,
+  capability card and the three sample cards are gone once the first typed
+  question exists; the exchange is there instead.
+* `test_landing_page_is_replaced_on_the_same_run_as_the_submission` — with an
+  aborting `ask` stub the mid-run page is read directly: question +
+  `sentrasql-processing` surface on screen, no landing copy, no answer yet, and
+  nothing appended to the history while in flight.
+* `test_processing_state_renders_above_the_composer` — element order is question
+  → processing surface → composer input → Ask button.
+* `test_each_further_question_appends_to_the_same_conversation` — three
+  exchanges (two typed, one sample) in one conversation container, oldest first,
+  each question/answer rendered exactly once, landing never returning, Ask the
+  only remaining button.
+* `DashboardProcessingStateTest` — the component's markup contract (label,
+  status, supporting line, decorative indicator, no avatar/timestamp/username)
+  and the presence of its rules in the shared stylesheet.
+
+### Verification performed
+
+* `tests/test_dashboard_app.py` — 16 passed (10 existing + 6 new); whole suite —
+  261 passed, 60 subtests passed.
+* Behaviour probes against the **real** app with a stub `ask` that aborts the
+  run, so the in-flight page could be inspected directly: a typed question and a
+  landing sample-card click both render the question bubble + processing surface
+  inside the conversation container with the composer after it, and the sample
+  path clears the landing (hero, cards, capability card, all three sample
+  buttons) on that same run.
+* Mechanism checks against the installed Streamlit 1.63 (AppTest element-tree
+  probes plus the bundled frontend/Python source): `st.empty()` single-element
+  semantics, `st.container()` multi-element + later-write semantics, container
+  DOM node (`stVerticalBlock`, `gap: 0` via eager CSS), `stEmpty` rendering, and
+  the fact that every element keeps its `stElementContainer` wrapper at any
+  nesting depth (so the hero/cards centering rules still match).
+* Known limitation of this verification: no browser screenshot was available in
+  this environment, so the new surface was validated structurally (mid-run DOM
+  order from headless AppTest plus stylesheet assertions) rather than by pixel.
+* Known limitation of the app (unchanged by this task, and pre-existing): there
+  is no auto-scroll, so in a transcript taller than the viewport a newly
+  submitted exchange still lands below the fold. The landing→chat path this task
+  is about fits the viewport, so the question and its processing state are
+  visible immediately; adding auto-scroll would require custom JS, which is out
+  of scope for this fix.
